@@ -16,7 +16,7 @@ export class DatabaseService implements OnModuleDestroy {
     text: string,
     params?: unknown[],
   ): Promise<QueryResult<T>> {
-    return this.pool.query<T>(text, params);
+    return this.pool.query(text, params);
   }
 
   async getClient() {
