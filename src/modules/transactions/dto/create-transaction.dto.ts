@@ -2,7 +2,6 @@ import {
   IsUUID,
   IsEnum,
   IsInt,
-  Min,
   IsString,
   IsOptional,
   Matches,
@@ -25,7 +24,6 @@ export class CreateTransactionDto {
   type: TransactionType;
 
   @IsInt()
-  @Min(1)
   amountMinor: number;
 
   @Matches(/^[A-Z]{3}$/)
