@@ -61,11 +61,11 @@ export class TransactionsService {
 
       const idempotencyResult = await client.query<IdempotencyKeyRow>(
         `
-          SELECT response, request_hash
-          FROM idempotency_keys
-          WHERE idempotency_key = $1
-          FOR UPDATE
-        `,
+            SELECT response, request_hash
+            FROM idempotency_keys
+            WHERE idempotency_key = $1
+            FOR UPDATE
+          `,
         [idempotencyKey],
       );
 
@@ -85,19 +85,19 @@ export class TransactionsService {
 
       const transactionResult = await client.query<TransactionRow>(
         `
-          INSERT INTO transactions (
-            id,
-            account_id,
-            category_id,
-            type,
-            amount_minor,
-            currency,
-            description,
-            occurred_at
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-          RETURNING *
-        `,
+            INSERT INTO transactions (
+              id,
+              account_id,
+              category_id,
+              type,
+              amount_minor,
+              currency,
+              description,
+              occurred_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *
+          `,
         [
           randomUUID(),
           dto.accountId,
@@ -114,14 +114,14 @@ export class TransactionsService {
 
       await client.query(
         `
-          INSERT INTO idempotency_keys (
-            id,
-            idempotency_key,
-            request_hash,
-            response
-          )
-          VALUES ($1, $2, $3, $4::jsonb)
-        `,
+            INSERT INTO idempotency_keys (
+              id,
+              idempotency_key,
+              request_hash,
+              response
+            )
+            VALUES ($1, $2, $3, $4::jsonb)
+          `,
         [randomUUID(), idempotencyKey, requestHash, JSON.stringify(response)],
       );
 
