@@ -1,4 +1,8 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+} from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
 import { DatabaseService } from '../../common/database/database.service';
 import {
@@ -32,7 +36,7 @@ export class TransactionsService {
     idempotencyKey: string,
   ): Promise<TransactionRow> {
     if (!idempotencyKey) {
-      throw new Error('Idempotency key required');
+      throw new BadRequestException('Idempotency key required');
     }
 
     const requestHash = createHash('sha256')
@@ -130,6 +134,24 @@ export class TransactionsService {
       return response;
     } catch (error) {
       await client.query('ROLLBACK');
+
+      if (
+        error instanceof ConflictException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+
+      const databaseError = error as { code?: string };
+
+      if (databaseError.code === '23505') {
+        throw new ConflictException();
+      }
+
+      if (databaseError.code === '23514' || databaseError.code === '22P02') {
+        throw new BadRequestException();
+      }
+
       throw error;
     } finally {
       client.release();
