@@ -2,9 +2,11 @@ import {
   IsUUID,
   IsEnum,
   IsInt,
+  IsISO8601,
   IsString,
   IsOptional,
   Matches,
+  Min,
 } from 'class-validator';
 
 export enum TransactionType {
@@ -24,6 +26,7 @@ export class CreateTransactionDto {
   type: TransactionType;
 
   @IsInt()
+  @Min(1)
   amountMinor: number;
 
   @Matches(/^[A-Z]{3}$/)
@@ -33,7 +36,8 @@ export class CreateTransactionDto {
   @IsOptional()
   description?: string;
 
-  @IsString()
+  @IsISO8601({ strict: true, strictSeparator: true })
+  @Matches(/T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/)
   occurredAt: string;
 
   @IsUUID()
