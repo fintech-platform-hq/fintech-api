@@ -1,0 +1,195 @@
+openapi: 3.1.0
+info:
+  title: Fintech API
+  version: 0.0.1
+  description: Public contract for the current unauthenticated transaction API milestone.
+servers:
+  - url: https://fintech-api-87yw.onrender.com
+    description: Production
+  - url: http://localhost:3000
+    description: Local development
+security: []
+paths:
+  /transactions:
+    post:
+      summary: Create or replay a transaction
+      operationId: createTransaction
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: UUID that remains stable for every retry of the same complete request payload.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionRequest'
+      responses:
+        '201':
+          description: Transaction created, or the original transaction returned for an identical replay.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /health:
+    get:
+      summary: Check process liveness
+      description: Confirms only that the application process is responding; it does not check database readiness.
+      operationId: getHealth
+      responses:
+        '200':
+          description: Application process is responding.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+components:
+  headers:
+    RequestId:
+      description: Server-generated request correlation UUID.
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    TransactionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - accountId
+        - type
+        - amountMinor
+        - currency
+        - occurredAt
+        - clientMutationId
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        categoryId:
+          type: [string, 'null']
+          format: uuid
+        type:
+          type: string
+          enum: [debit, credit]
+        amountMinor:
+          type: integer
+          minimum: 1
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        description:
+          type: [string, 'null']
+        occurredAt:
+          type: string
+          format: date-time
+        clientMutationId:
+          type: string
+          format: uuid
+          description: Stable for retries of one logical operation; not independently persisted or database-unique in this milestone.
+    TransactionResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - accountId
+        - categoryId
+        - type
+        - amountMinor
+        - currency
+        - description
+        - occurredAt
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        categoryId:
+          type: [string, 'null']
+          format: uuid
+        type:
+          type: string
+          enum: [debit, credit]
+        amountMinor:
+          type: integer
+          minimum: 1
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        description:
+          type: [string, 'null']
+        occurredAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [statusCode, message, error]
+      properties:
+        statusCode:
+          type: integer
+        message:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        error:
+          type: string
+  responses:
+    BadRequest:
+      description: Invalid header or request body.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: The idempotency key was previously used with a different complete request payload.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalServerError:
+      description: Unexpected server or persistence failure.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

@@ -4,26 +4,16 @@ import {
   Injectable,
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
+import { isUUID } from 'class-validator';
 import { DatabaseService } from '../../common/database/database.service';
+import { CreateTransactionDto } from './dto/create-transaction.dto';
 import {
-  CreateTransactionDto,
-  TransactionType,
-} from './dto/create-transaction.dto';
-
-export interface TransactionRow {
-  id: string;
-  account_id: string;
-  category_id: string | null;
-  type: TransactionType;
-  amount_minor: number;
-  currency: string;
-  description: string | null;
-  occurred_at: Date;
-  created_at: Date;
-}
+  TransactionPersistenceRecord,
+  TransactionResponseDto,
+} from './dto/transaction-response.dto';
 
 interface IdempotencyKeyRow {
-  response: TransactionRow;
+  response: TransactionPersistenceRecord | TransactionResponseDto;
   request_hash: string;
 }
 
@@ -34,9 +24,13 @@ export class TransactionsService {
   async createTransaction(
     dto: CreateTransactionDto,
     idempotencyKey: string,
-  ): Promise<TransactionRow> {
+  ): Promise<TransactionResponseDto> {
     if (!idempotencyKey) {
       throw new BadRequestException('Idempotency key required');
+    }
+
+    if (!isUUID(idempotencyKey)) {
+      throw new BadRequestException('Idempotency key must be a UUID');
     }
 
     const requestHash = createHash('sha256')
@@ -84,11 +78,14 @@ export class TransactionsService {
 
         await client.query('COMMIT');
 
-        return existingIdempotencyKey.response;
+        return TransactionResponseDto.fromStoredResponse(
+          existingIdempotencyKey.response,
+        );
       }
 
-      const transactionResult = await client.query<TransactionRow>(
-        `
+      const transactionResult =
+        await client.query<TransactionPersistenceRecord>(
+          `
             INSERT INTO transactions (
               id,
               account_id,
@@ -102,19 +99,21 @@ export class TransactionsService {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *
           `,
-        [
-          randomUUID(),
-          dto.accountId,
-          dto.categoryId ?? null,
-          dto.type,
-          dto.amountMinor,
-          dto.currency,
-          dto.description ?? null,
-          dto.occurredAt,
-        ],
-      );
+          [
+            randomUUID(),
+            dto.accountId,
+            dto.categoryId ?? null,
+            dto.type,
+            dto.amountMinor,
+            dto.currency,
+            dto.description ?? null,
+            dto.occurredAt,
+          ],
+        );
 
-      const response = transactionResult.rows[0];
+      const response = TransactionResponseDto.fromPersistence(
+        transactionResult.rows[0],
+      );
 
       await client.query(
         `
