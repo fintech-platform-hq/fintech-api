@@ -4,9 +4,11 @@ import { TransactionsModule } from './modules/transactions/transactions.module';
 import { DatabaseModule } from './common/database/database.module';
 import { ErrorLoggingInterceptor } from './common/logging/error-logging.interceptor';
 import { RequestLoggingMiddleware } from './common/logging/request-logging.middleware';
+import { AppController } from './app.controller';
 
 @Module({
   imports: [DatabaseModule, TransactionsModule],
+  controllers: [AppController],
   providers: [
     {
       provide: APP_INTERCEPTOR,
