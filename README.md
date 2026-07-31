@@ -1,98 +1,407 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Fintech API
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+A transaction API focused on reliable financial writes, request idempotency, and explicit PostgreSQL transaction handling.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+This repository contains the backend foundation of a broader fintech platform. The current milestone implements transaction creation with protection against duplicate writes caused by retries, network failures, or repeated client requests.
 
-## Description
+## Live API
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+**Base URL**
 
-## Project setup
-
-```bash
-$ npm install
+```text
+https://fintech-api-87yw.onrender.com
 ```
 
-## Compile and run the project
+**Service status**
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+curl https://fintech-api-87yw.onrender.com/
 ```
 
-## Run tests
+```json
+{
+  "name": "fintech-api",
+  "status": "running"
+}
+```
+
+**Health check**
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+curl https://fintech-api-87yw.onrender.com/health
 ```
 
-## Deployment
+```json
+{
+  "status": "ok"
+}
+```
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+> The Render service may take a few seconds to respond after a period of inactivity.
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## Current Scope
+
+The current API milestone provides:
+
+- Transaction creation with PostgreSQL persistence
+- Idempotent writes using the `Idempotency-Key` header
+- Conflict detection when a key is reused with a different payload
+- Atomic persistence of transaction and idempotency records
+- Structured request and error logging
+- Request correlation through `X-Request-Id`
+- Docker-based local environment
+- Public deployment using Render and Neon
+- OpenAPI 3.1 contract for the transactions endpoint
+
+Authentication, authorization, account ownership validation, Redis, rate limiting, and refresh-token rotation are planned for later milestones and are not currently implemented.
+
+## Why Idempotency Matters
+
+Financial clients often retry requests when a response is delayed or a connection is interrupted. Without idempotency protection, the same logical operation could be persisted more than once.
+
+This API requires an `Idempotency-Key` for transaction creation and handles repeated requests as follows:
+
+| Request | Result |
+|---|---|
+| New key and valid payload | Creates the transaction and returns `201 Created` |
+| Same key and same payload | Returns the original transaction without creating a duplicate |
+| Same key and different payload | Rejects the request with `409 Conflict` |
+
+The API generates a deterministic hash from the request payload. The hash is stored with the idempotency record and used to distinguish a legitimate retry from conflicting key reuse.
+
+The transaction and its idempotency record are persisted inside the same PostgreSQL transaction. A failure rolls back both operations.
+
+## API
+
+### Create a transaction
+
+```http
+POST /transactions
+```
+
+#### Headers
+
+```http
+Content-Type: application/json
+Idempotency-Key: <unique-key>
+```
+
+#### Example request
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+curl -i \
+  -X POST https://fintech-api-87yw.onrender.com/transactions \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: transaction-example-001" \
+  -d '{
+    "accountId": "00000000-0000-0000-0000-000000000001",
+    "type": "credit",
+    "amountMinor": 15000,
+    "currency": "BRL",
+    "occurredAt": "2026-07-30T18:00:00.000Z"
+  }'
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+`amountMinor` is expressed in the currency's minor unit. For example, `15000` represents `R$ 150,00` when the currency is `BRL`.
 
-## Resources
+#### Example response
 
-Check out a few resources that may come in handy when working with NestJS:
+```json
+{
+  "id": "6aef7ec3-58fb-4ac7-8ff2-920e90ce0b4c",
+  "account_id": "00000000-0000-0000-0000-000000000001",
+  "type": "credit",
+  "amount_minor": 15000,
+  "currency": "BRL",
+  "occurred_at": "2026-07-30T18:00:00.000Z",
+  "created_at": "2026-07-30T18:00:01.421Z"
+}
+```
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+### Replay the same request
 
-## Support
+Send the same payload using the same idempotency key:
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+```bash
+curl -i \
+  -X POST https://fintech-api-87yw.onrender.com/transactions \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: transaction-example-001" \
+  -d '{
+    "accountId": "00000000-0000-0000-0000-000000000001",
+    "type": "credit",
+    "amountMinor": 15000,
+    "currency": "BRL",
+    "occurredAt": "2026-07-30T18:00:00.000Z"
+  }'
+```
 
-## Stay in touch
+The API returns the transaction associated with the original request instead of inserting a second record.
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+### Test conflicting key reuse
+
+Reuse the same key with a modified payload:
+
+```bash
+curl -i \
+  -X POST https://fintech-api-87yw.onrender.com/transactions \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: transaction-example-001" \
+  -d '{
+    "accountId": "00000000-0000-0000-0000-000000000001",
+    "type": "credit",
+    "amountMinor": 25000,
+    "currency": "BRL",
+    "occurredAt": "2026-07-30T18:00:00.000Z"
+  }'
+```
+
+The API rejects the request with:
+
+```http
+HTTP/1.1 409 Conflict
+```
+
+Use a new idempotency key when repeating these examples after the first successful request.
+
+## Request Correlation and Logging
+
+Every request receives an `X-Request-Id`.
+
+Clients may provide their own identifier:
+
+```bash
+curl -i \
+  https://fintech-api-87yw.onrender.com/health \
+  -H "X-Request-Id: local-debug-001"
+```
+
+When the header is omitted, the API generates one.
+
+Structured logs include:
+
+- Request ID
+- HTTP method
+- Request path
+- Response status
+- Request duration
+- Error context when a request fails
+
+This makes it possible to correlate client errors with backend events without relying on unstructured console messages.
+
+## Architecture
+
+The codebase follows NestJS module boundaries while keeping persistence behavior explicit.
+
+```text
+src/
+├── app.controller.ts
+├── app.module.ts
+├── main.ts
+├── common/
+│   ├── database/
+│   └── logging/
+└── modules/
+    └── transactions/
+```
+
+### Request flow
+
+```text
+HTTP request
+    │
+    ▼
+Transactions Controller
+    │
+    ▼
+Validation and application logic
+    │
+    ▼
+PostgreSQL transaction
+    ├── Check idempotency key
+    ├── Compare request hash
+    ├── Insert financial transaction
+    └── Store idempotency response
+```
+
+The project currently uses explicit SQL through `pg` rather than an ORM. This keeps transaction boundaries, locking behavior, constraints, and rollback semantics visible in the implementation.
+
+## Technology
+
+| Area | Technology |
+|---|---|
+| Runtime | Node.js |
+| Language | TypeScript |
+| Framework | NestJS |
+| Database | PostgreSQL |
+| Database client | `pg` |
+| API contract | OpenAPI 3.1 |
+| Containers | Docker and Docker Compose |
+| API hosting | Render |
+| Managed PostgreSQL | Neon |
+
+## Local Development
+
+### Requirements
+
+- Node.js
+- npm
+- Docker
+- Docker Compose
+
+### Install dependencies
+
+```bash
+npm install
+```
+
+### Environment configuration
+
+Create a local environment file based on the repository example and provide a PostgreSQL connection string:
+
+```env
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/fintech
+PORT=3000
+```
+
+Do not commit real credentials or production connection strings.
+
+### Start with Docker
+
+```bash
+docker compose up --build
+```
+
+### Start the API without Docker
+
+With PostgreSQL already running:
+
+```bash
+npm run start:dev
+```
+
+The API will be available at:
+
+```text
+http://localhost:3000
+```
+
+### Verify the local service
+
+```bash
+curl http://localhost:3000/
+curl http://localhost:3000/health
+```
+
+## Available Scripts
+
+```bash
+# Development with file watching
+npm run start:dev
+
+# Production build
+npm run build
+
+# Run compiled application
+npm run start:prod
+
+# Lint
+npm run lint
+
+# Unit tests
+npm run test
+
+# End-to-end tests
+npm run test:e2e
+
+# Test coverage
+npm run test:cov
+```
+
+## Error Handling
+
+The API returns consistent HTTP errors for invalid or conflicting requests.
+
+Relevant transaction responses include:
+
+| Status | Meaning |
+|---|---|
+| `201 Created` | Transaction created successfully |
+| `400 Bad Request` | Invalid input or missing required data |
+| `409 Conflict` | Idempotency key reused with a different payload |
+| `500 Internal Server Error` | Unexpected server or persistence failure |
+
+Internal errors are logged with request context. Infrastructure details and sensitive database information are not intended to be exposed in client responses.
+
+## Design Decisions
+
+### Store monetary values as integers
+
+Transaction amounts are represented in minor units rather than floating-point values.
+
+```text
+R$ 150,00 → 15000
+```
+
+This avoids floating-point precision errors in financial calculations.
+
+### Keep idempotency inside PostgreSQL
+
+The transaction and its idempotency result are committed atomically in the same database transaction. The API cannot persist one without the other.
+
+Redis may be introduced later for distributed coordination and caching, but it is not treated as the source of truth for the current implementation.
+
+### Use database constraints as a final safeguard
+
+Application checks improve error handling, while PostgreSQL constraints protect persisted data from invalid or duplicated states.
+
+### Use explicit SQL transaction boundaries
+
+The current implementation favors visible transaction control over ORM abstractions. This makes commit, rollback, locking, and failure behavior easier to inspect during this stage of development.
+
+## Current Limitations
+
+This repository is under active development. The current version does not yet include:
+
+- User authentication
+- Authorization or account ownership checks
+- JWT and refresh-token rotation
+- Redis integration
+- Rate limiting
+- Versioned database migrations
+- Automated GitHub Actions checks
+- Complete integration and concurrency test coverage
+- Production-grade readiness checks for external dependencies
+
+`GET /health` currently verifies that the application process is responding. It does not yet confirm database readiness.
+
+These items are documented as future work rather than represented as completed functionality.
+
+## Roadmap
+
+Planned backend milestones include:
+
+1. Introduce versioned database migrations
+2. Add automated unit, integration, and concurrency tests
+3. Add GitHub Actions for build, lint, and test validation
+4. Implement users and accounts
+5. Add JWT authentication and refresh-token rotation
+6. Enforce account ownership and authorization
+7. Introduce Redis and rate limiting
+8. Add separate liveness and readiness probes
+9. Integrate the API with the iOS client and admin dashboard
+
+## Related Platform Repositories
+
+This API is one component of a larger portfolio project:
+
+- Native iOS application
+- NestJS backend
+- React administration dashboard
+- Architecture and product documentation
+
+The repositories are separated to keep deployment, ownership, and technical decisions clear for each application.
 
 ## License
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+This project is currently maintained as a portfolio and learning project. No open-source license has been assigned yet.
