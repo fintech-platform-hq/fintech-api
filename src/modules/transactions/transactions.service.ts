@@ -6,7 +6,10 @@ import {
 import { createHash, randomUUID } from 'crypto';
 import { isUUID } from 'class-validator';
 import { DatabaseService } from '../../common/database/database.service';
-import { CreateTransactionDto } from './dto/create-transaction.dto';
+import {
+  CreateTransactionDto,
+  TransactionType,
+} from './dto/create-transaction.dto';
 import {
   TransactionPersistenceRecord,
   TransactionResponseDto,
@@ -33,20 +36,8 @@ export class TransactionsService {
       throw new BadRequestException('Idempotency key must be a UUID');
     }
 
-    const requestHash = createHash('sha256')
-      .update(
-        JSON.stringify({
-          accountId: dto.accountId,
-          categoryId: dto.categoryId ?? null,
-          type: dto.type,
-          amountMinor: dto.amountMinor,
-          currency: dto.currency,
-          description: dto.description ?? null,
-          occurredAt: dto.occurredAt,
-          clientMutationId: dto.clientMutationId,
-        }),
-      )
-      .digest('hex');
+    const requestHash = this.getRequestHash(dto);
+    const legacyRequestHash = this.getLegacyRequestHash(dto);
 
     const client = await this.db.getClient();
 
@@ -70,7 +61,10 @@ export class TransactionsService {
       const existingIdempotencyKey = idempotencyResult.rows[0];
 
       if (existingIdempotencyKey) {
-        if (existingIdempotencyKey.request_hash !== requestHash) {
+        if (
+          existingIdempotencyKey.request_hash !== requestHash &&
+          existingIdempotencyKey.request_hash !== legacyRequestHash
+        ) {
           throw new ConflictException(
             'Idempotency key was already used with a different request',
           );
@@ -155,5 +149,36 @@ export class TransactionsService {
     } finally {
       client.release();
     }
+  }
+
+  private getRequestHash(
+    dto: CreateTransactionDto,
+    type: string = dto.type,
+  ): string {
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          accountId: dto.accountId,
+          categoryId: dto.categoryId ?? null,
+          type,
+          amountMinor: dto.amountMinor,
+          currency: dto.currency,
+          description: dto.description ?? null,
+          occurredAt: dto.occurredAt,
+          clientMutationId: dto.clientMutationId,
+        }),
+      )
+      .digest('hex');
+  }
+
+  private getLegacyRequestHash(dto: CreateTransactionDto): string | undefined {
+    const legacyType =
+      dto.type === TransactionType.EXPENSE
+        ? 'debit'
+        : dto.type === TransactionType.INCOME
+          ? 'credit'
+          : undefined;
+
+    return legacyType ? this.getRequestHash(dto, legacyType) : undefined;
   }
 }

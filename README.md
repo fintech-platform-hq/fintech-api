@@ -77,6 +77,9 @@ The transaction and its idempotency record are persisted inside the same Postgre
 
 ### Create a transaction
 
+Use `expense` for an outgoing amount and `income` for an incoming amount.
+The legacy values `debit` and `credit` are rejected with `400 Bad Request`.
+
 ```http
 POST /transactions
 ```
@@ -98,7 +101,7 @@ curl -i \
   -d '{
     "accountId": "00000000-0000-4000-8000-000000000001",
     "categoryId": "00000000-0000-4000-8000-000000000002",
-    "type": "credit",
+    "type": "income",
     "amountMinor": 15000,
     "currency": "BRL",
     "description": "Salary",
@@ -116,7 +119,7 @@ curl -i \
   "id": "6aef7ec3-58fb-4ac7-8ff2-920e90ce0b4c",
   "accountId": "00000000-0000-4000-8000-000000000001",
   "categoryId": "00000000-0000-4000-8000-000000000002",
-  "type": "credit",
+  "type": "income",
   "amountMinor": 15000,
   "currency": "BRL",
   "description": "Salary",
@@ -137,7 +140,7 @@ curl -i \
   -d '{
     "accountId": "00000000-0000-4000-8000-000000000001",
     "categoryId": "00000000-0000-4000-8000-000000000002",
-    "type": "credit",
+    "type": "income",
     "amountMinor": 15000,
     "currency": "BRL",
     "description": "Salary",
@@ -160,7 +163,7 @@ curl -i \
   -d '{
     "accountId": "00000000-0000-4000-8000-000000000001",
     "categoryId": "00000000-0000-4000-8000-000000000002",
-    "type": "credit",
+    "type": "income",
     "amountMinor": 25000,
     "currency": "BRL",
     "description": "Salary",

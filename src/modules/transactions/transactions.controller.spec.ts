@@ -10,7 +10,7 @@ import { TransactionsService } from './transactions.service';
 describe('TransactionsController', () => {
   const dto: CreateTransactionDto = {
     accountId: '00000000-0000-4000-8000-000000000001',
-    type: TransactionType.DEBIT,
+    type: TransactionType.EXPENSE,
     amountMinor: 500,
     currency: 'BRL',
     occurredAt: '2026-07-30T18:00:00.000Z',

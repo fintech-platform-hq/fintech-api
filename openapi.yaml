@@ -94,7 +94,8 @@ components:
           format: uuid
         type:
           type: string
-          enum: [debit, credit]
+          enum: [expense, income]
+          description: expense is an outgoing amount; income is an incoming amount.
         amountMinor:
           type: integer
           minimum: 1
@@ -135,7 +136,8 @@ components:
           format: uuid
         type:
           type: string
-          enum: [debit, credit]
+          enum: [expense, income]
+          description: expense is an outgoing amount; income is an incoming amount.
         amountMinor:
           type: integer
           minimum: 1

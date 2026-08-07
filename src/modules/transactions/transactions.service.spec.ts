@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { createHash } from 'crypto';
 import { DatabaseService } from '../../common/database/database.service';
 import {
   CreateTransactionDto,
@@ -15,7 +16,7 @@ describe('TransactionsService', () => {
   const dto: CreateTransactionDto = {
     accountId: '00000000-0000-4000-8000-000000000001',
     categoryId: '00000000-0000-4000-8000-000000000002',
-    type: TransactionType.CREDIT,
+    type: TransactionType.INCOME,
     amountMinor: 15000,
     currency: 'BRL',
     description: 'Salary',
@@ -112,6 +113,35 @@ describe('TransactionsService', () => {
       service.createTransaction(dto, idempotencyKey),
     ).resolves.toEqual(response);
     expect(query).toHaveBeenCalledTimes(4);
+    expect(query).toHaveBeenLastCalledWith('COMMIT');
+  });
+
+  it('replays a pre-rename idempotency key using the renamed transaction type', async () => {
+    const legacyRequestHash = createHash('sha256')
+      .update(
+        JSON.stringify({
+          accountId: dto.accountId,
+          categoryId: dto.categoryId ?? null,
+          type: 'credit',
+          amountMinor: dto.amountMinor,
+          currency: dto.currency,
+          description: dto.description ?? null,
+          occurredAt: dto.occurredAt,
+          clientMutationId: dto.clientMutationId,
+        }),
+      )
+      .digest('hex');
+    query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{ response, request_hash: legacyRequestHash }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(
+      service.createTransaction(dto, idempotencyKey),
+    ).resolves.toEqual(response);
     expect(query).toHaveBeenLastCalledWith('COMMIT');
   });
 
