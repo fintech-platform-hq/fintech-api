@@ -14,7 +14,7 @@ describe('Application contract (e2e)', () => {
   const requestBody = {
     accountId: '00000000-0000-4000-8000-000000000001',
     categoryId: '00000000-0000-4000-8000-000000000002',
-    type: 'credit',
+    type: 'income',
     amountMinor: 15000,
     currency: 'BRL',
     description: 'Salary',
@@ -124,7 +124,7 @@ describe('Application contract (e2e)', () => {
     );
   });
 
-  it('returns camelCase for creation and the identical replay', async () => {
+  it('creates an income transaction and returns the identical replay', async () => {
     const first = await postTransaction(idempotencyKey, requestBody).expect(
       201,
     );
@@ -174,6 +174,37 @@ describe('Application contract (e2e)', () => {
       error: 'Conflict',
     });
   });
+
+  it('creates an expense transaction', async () => {
+    const response = await postTransaction(
+      '00000000-0000-4000-8000-000000000005',
+      { ...requestBody, type: 'expense' },
+    ).expect(201);
+
+    const responseBody: unknown = response.body;
+
+    expect(isRecord(responseBody) && responseBody.type).toBe('expense');
+  });
+
+  it.each(['debit', 'credit'])(
+    'returns 400 for legacy type %s',
+    async (type) => {
+      const response = await postTransaction(idempotencyKey, {
+        ...requestBody,
+        type,
+      }).expect(400);
+      const responseBody: unknown = response.body;
+
+      expect(responseBody).toMatchObject({
+        statusCode: 400,
+        error: 'Bad Request',
+      });
+      expect(
+        isRecord(responseBody) && Array.isArray(responseBody.message),
+      ).toBe(true);
+      expect(getClient).not.toHaveBeenCalled();
+    },
+  );
 
   it('returns 400 for an invalid Idempotency-Key UUID', async () => {
     const response = await postTransaction('not-a-uuid', requestBody).expect(
