@@ -1,6 +1,6 @@
 # Fintech API
 
-A transaction API focused on reliable financial writes, request idempotency, and explicit PostgreSQL transaction handling.
+A transaction API focused on authenticated financial writes, ownership, request idempotency, and explicit PostgreSQL transaction handling.
 
 This repository contains the backend foundation of a broader fintech platform. The current milestone implements transaction creation with protection against duplicate writes caused by retries, network failures, or repeated client requests.
 
@@ -44,16 +44,18 @@ curl https://fintech-api-87yw.onrender.com/health
 The current API milestone provides:
 
 - Transaction creation with PostgreSQL persistence
+- Email/password authentication with 15-minute HS256 access tokens
+- Opaque 30-day refresh tokens with rotation and reuse-family revocation
+- User-owned accounts and optional categories enforced by PostgreSQL constraints
 - Idempotent writes using the `Idempotency-Key` header
 - Conflict detection when a key is reused with a different payload
 - Atomic persistence of transaction and idempotency records
 - Structured request and error logging
 - Request correlation through `X-Request-Id`
 - Docker-based local environment
-- Public deployment using Render and Neon
 - [OpenAPI 3.1 contract](./openapi.yaml) for the current public API
 
-Authentication, authorization, account ownership validation, Redis, rate limiting, and refresh-token rotation are planned for later milestones and are not currently implemented.
+The repository implementation is ahead of the currently deployed database. The ownership migration has not been run against Neon production because existing demo data requires separate approval before any reset or destructive handling.
 
 ## Why Idempotency Matters
 
@@ -88,6 +90,7 @@ POST /transactions
 
 ```http
 Content-Type: application/json
+Authorization: Bearer <access-token>
 Idempotency-Key: <uuid>
 ```
 
@@ -97,6 +100,7 @@ Idempotency-Key: <uuid>
 curl -i \
   -X POST https://fintech-api-87yw.onrender.com/transactions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <access-token>" \
   -H "Idempotency-Key: 00000000-0000-4000-8000-000000000004" \
   -d '{
     "accountId": "00000000-0000-4000-8000-000000000001",
@@ -111,6 +115,8 @@ curl -i \
 ```
 
 `amountMinor` is expressed in the currency's minor unit. For example, `15000` represents `R$ 150,00` when the currency is `BRL`.
+
+The account and optional category must belong to the authenticated user. Transaction currency must equal account currency. Missing and foreign-owned resources both return `404` to avoid exposing ownership information. Idempotency keys are scoped by authenticated user.
 
 #### Example response
 
@@ -136,6 +142,7 @@ Send the same payload using the same idempotency key:
 curl -i \
   -X POST https://fintech-api-87yw.onrender.com/transactions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <access-token>" \
   -H "Idempotency-Key: 00000000-0000-4000-8000-000000000004" \
   -d '{
     "accountId": "00000000-0000-4000-8000-000000000001",
@@ -159,6 +166,7 @@ Reuse the same key with a modified payload:
 curl -i \
   -X POST https://fintech-api-87yw.onrender.com/transactions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <access-token>" \
   -H "Idempotency-Key: 00000000-0000-4000-8000-000000000004" \
   -d '{
     "accountId": "00000000-0000-4000-8000-000000000001",
@@ -215,6 +223,7 @@ src/
 │   ├── database/
 │   └── logging/
 └── modules/
+    ├── auth/
     └── transactions/
 ```
 
@@ -274,6 +283,9 @@ Create a local environment file based on the repository example and provide a Po
 
 ```env
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/fintech
+JWT_ACCESS_SECRET=<at-least-32-characters-from-a-secret-store>
+JWT_ISSUER=fintech-api
+JWT_AUDIENCE=fintech-clients
 PORT=3000
 ```
 
@@ -327,6 +339,9 @@ npm run test
 # End-to-end tests
 npm run test:e2e
 
+# PostgreSQL integration tests; database name must end in _test
+TEST_DATABASE_URL=postgresql://localhost:5432/fintech_test npm run test:integration
+
 # Test coverage
 npm run test:cov
 ```
@@ -341,7 +356,10 @@ Relevant transaction responses include:
 | --------------------------- | ----------------------------------------------- |
 | `201 Created`               | Transaction created successfully                |
 | `400 Bad Request`           | Invalid input or missing required data          |
+| `401 Unauthorized`          | Missing, invalid, or expired authentication     |
+| `404 Not Found`             | Resource unavailable to the authenticated user |
 | `409 Conflict`              | Idempotency key reused with a different payload |
+| `429 Too Many Requests`     | Authentication endpoint rate limit exceeded    |
 | `500 Internal Server Error` | Unexpected server or persistence failure        |
 
 Errors retain the current NestJS envelope. Validation failures may contain an array of messages:
@@ -354,7 +372,7 @@ Errors retain the current NestJS envelope. Validation failures may contain an ar
 }
 ```
 
-No authentication is enforced or required in this milestone. Sending an `Authorization` header has no effect.
+`POST /transactions` derives identity only from the validated JWT `sub`; identity fields supplied through the payload are rejected.
 
 Internal errors are logged with request context. Infrastructure details and sensitive database information are not intended to be exposed in client responses.
 
@@ -388,33 +406,24 @@ The current implementation favors visible transaction control over ORM abstracti
 
 This repository is under active development. The current version does not yet include:
 
-- User authentication
-- Authorization or account ownership checks
-- JWT and refresh-token rotation
 - Redis integration
-- Rate limiting
-- Versioned database migrations
 - Automated GitHub Actions checks
-- Complete integration and concurrency test coverage
+- Concurrency stress-test coverage
 - Production-grade readiness checks for external dependencies
 
 `GET /health` currently verifies that the application process is responding. It does not yet confirm database readiness.
 
-These items are documented as future work rather than represented as completed functionality.
+Authentication endpoints use process-local, per-IP rate limits: register/login allow 5 requests per 15 minutes, refresh allows 10, and logout allows 30. This is intentionally limited to the current single-instance architecture and must move to shared storage before scale-out.
 
 ## Roadmap
 
 Planned backend milestones include:
 
-1. Introduce versioned database migrations
-2. Add automated unit, integration, and concurrency tests
-3. Add GitHub Actions for build, lint, and test validation
-4. Implement users and accounts
-5. Add JWT authentication and refresh-token rotation
-6. Enforce account ownership and authorization
-7. Introduce Redis and rate limiting
-8. Add separate liveness and readiness probes
-9. Integrate the API with the iOS client and admin dashboard
+1. Approve and execute production demo-data handling before applying the ownership migration
+2. Add GitHub Actions for build, lint, and test validation
+3. Replace process-local rate limiting with shared storage before scale-out
+4. Add separate liveness and readiness probes
+5. Integrate the authenticated API with the iOS client and admin dashboard
 
 ## Related Platform Repositories
 

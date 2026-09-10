@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Fintech API
   version: 0.0.1
-  description: Public contract for the current unauthenticated transaction API milestone.
+  description: Public contract for authenticated transaction creation with account and category ownership.
 servers:
   - url: https://fintech-api-87yw.onrender.com
     description: Production
@@ -10,10 +10,86 @@ servers:
     description: Local development
 security: []
 paths:
+  /auth/register:
+    post:
+      summary: Register with email and password
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      responses:
+        '201':
+          $ref: '#/components/responses/AuthTokens'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /auth/login:
+    post:
+      summary: Authenticate with email and password
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      responses:
+        '200':
+          $ref: '#/components/responses/AuthTokens'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /auth/refresh:
+    post:
+      summary: Rotate a refresh token
+      operationId: refresh
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/AuthTokens'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /auth/logout:
+    post:
+      summary: Revoke a refresh session
+      operationId: logout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+      responses:
+        '204':
+          description: Session revoked; no response body.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
   /transactions:
     post:
       summary: Create or replay a transaction
       operationId: createTransaction
+      security:
+        - bearerAuth: []
       parameters:
         - name: Idempotency-Key
           in: header
@@ -40,6 +116,10 @@ paths:
                 $ref: '#/components/schemas/TransactionResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
         '500':
@@ -68,6 +148,11 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
   headers:
     RequestId:
       description: Server-generated request correlation UUID.
@@ -75,6 +160,44 @@ components:
         type: string
         format: uuid
   schemas:
+    Credentials:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          description: Normalized by trimming surrounding whitespace and lowercasing.
+        password:
+          type: string
+          minLength: 12
+          maxLength: 128
+          format: password
+    RefreshTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+          maxLength: 256
+    AuthResponse:
+      type: object
+      additionalProperties: false
+      required: [accessToken, refreshToken, tokenType, expiresIn]
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        tokenType:
+          type: string
+          const: Bearer
+        expiresIn:
+          type: integer
+          const: 900
     TransactionRequest:
       type: object
       additionalProperties: false
@@ -155,7 +278,7 @@ components:
     ErrorResponse:
       type: object
       additionalProperties: false
-      required: [statusCode, message, error]
+      required: [statusCode, message]
       properties:
         statusCode:
           type: integer
@@ -168,6 +291,12 @@ components:
         error:
           type: string
   responses:
+    AuthTokens:
+      description: Access token and a new opaque refresh token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AuthResponse'
     BadRequest:
       description: Invalid header or request body.
       headers:
@@ -178,10 +307,28 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
     Conflict:
-      description: The idempotency key was previously used with a different complete request payload.
+      description: Unique resource conflict or idempotency key reused with a different payload.
       headers:
         X-Request-Id:
           $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Missing, invalid, or expired authentication credential.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Account or category does not exist for the authenticated user. Foreign-owned resources are intentionally indistinguishable.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    TooManyRequests:
+      description: Authentication endpoint rate limit exceeded.
       content:
         application/json:
           schema:
