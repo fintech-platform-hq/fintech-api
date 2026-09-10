@@ -24,6 +24,7 @@ describe('TransactionsService', () => {
     clientMutationId: '00000000-0000-4000-8000-000000000003',
   };
   const idempotencyKey = '00000000-0000-4000-8000-000000000004';
+  const userId = '00000000-0000-4000-8000-000000000010';
   const persistenceRecord = {
     id: '00000000-0000-4000-8000-000000000005',
     account_id: dto.accountId,
@@ -80,19 +81,21 @@ describe('TransactionsService', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ currency: 'BRL' }] })
+      .mockResolvedValueOnce({ rows: [{ exists: 1 }] })
       .mockResolvedValueOnce({ rows: [persistenceRecord] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] });
 
     await expect(
-      service.createTransaction(dto, idempotencyKey),
+      service.createTransaction(dto, idempotencyKey, userId),
     ).resolves.toEqual(response);
 
-    const idempotencyInsertParameters = query.mock.calls[4][1];
-    if (typeof idempotencyInsertParameters?.[3] !== 'string') {
+    const idempotencyInsertParameters = query.mock.calls[6][1];
+    if (typeof idempotencyInsertParameters?.[4] !== 'string') {
       throw new Error('Expected a serialized idempotency response');
     }
-    const storedResponse: unknown = JSON.parse(idempotencyInsertParameters[3]);
+    const storedResponse: unknown = JSON.parse(idempotencyInsertParameters[4]);
     expect(storedResponse).toEqual(response);
     expect(query).toHaveBeenLastCalledWith('COMMIT');
     expect(release).toHaveBeenCalledTimes(1);
@@ -110,7 +113,7 @@ describe('TransactionsService', () => {
       .mockResolvedValueOnce({ rows: [] });
 
     await expect(
-      service.createTransaction(dto, idempotencyKey),
+      service.createTransaction(dto, idempotencyKey, userId),
     ).resolves.toEqual(response);
     expect(query).toHaveBeenCalledTimes(4);
     expect(query).toHaveBeenLastCalledWith('COMMIT');
@@ -140,7 +143,7 @@ describe('TransactionsService', () => {
       .mockResolvedValueOnce({ rows: [] });
 
     await expect(
-      service.createTransaction(dto, idempotencyKey),
+      service.createTransaction(dto, idempotencyKey, userId),
     ).resolves.toEqual(response);
     expect(query).toHaveBeenLastCalledWith('COMMIT');
   });
@@ -155,22 +158,22 @@ describe('TransactionsService', () => {
       .mockResolvedValueOnce({ rows: [] });
 
     await expect(
-      service.createTransaction(dto, idempotencyKey),
+      service.createTransaction(dto, idempotencyKey, userId),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(query).toHaveBeenLastCalledWith('ROLLBACK');
     expect(release).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a missing idempotency key before opening a connection', async () => {
-    await expect(service.createTransaction(dto, '')).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
+    await expect(
+      service.createTransaction(dto, '', userId),
+    ).rejects.toBeInstanceOf(BadRequestException);
     expect(getClient).not.toHaveBeenCalled();
   });
 
   it('rejects an invalid idempotency key before opening a connection', async () => {
     await expect(
-      service.createTransaction(dto, 'not-a-uuid'),
+      service.createTransaction(dto, 'not-a-uuid', userId),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(getClient).not.toHaveBeenCalled();
   });
@@ -181,15 +184,17 @@ describe('TransactionsService', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ currency: 'BRL' }] })
+      .mockResolvedValueOnce({ rows: [{ exists: 1 }] })
       .mockResolvedValueOnce({ rows: [persistenceRecord] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] });
 
-    await service.createTransaction(dto, idempotencyKey);
-    const parameters = query.mock.calls[4][1];
-    if (typeof parameters?.[2] !== 'string') {
+    await service.createTransaction(dto, idempotencyKey, userId);
+    const parameters = query.mock.calls[6][1];
+    if (typeof parameters?.[3] !== 'string') {
       throw new Error('Expected the request hash insert parameter');
     }
-    return parameters[2];
+    return parameters[3];
   }
 });

@@ -1,7 +1,11 @@
+BEGIN;
+
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'transaction_type') THEN
-    CREATE TYPE transaction_type AS ENUM ('expense', 'income');
+  IF EXISTS (SELECT 1 FROM transactions LIMIT 1)
+    OR EXISTS (SELECT 1 FROM idempotency_keys LIMIT 1) THEN
+    RAISE EXCEPTION
+      'ownership migration requires an empty database; existing production data must be handled only after explicit approval';
   END IF;
 END
 $$;
@@ -32,22 +36,17 @@ CREATE TABLE categories (
   UNIQUE (user_id, id)
 );
 
-CREATE TABLE transactions (
-  id uuid PRIMARY KEY,
-  user_id uuid NOT NULL REFERENCES users (id),
-  account_id uuid NOT NULL,
-  category_id uuid NULL,
-  type transaction_type NOT NULL,
-  amount_minor integer NOT NULL CHECK (amount_minor > 0),
-  currency char(3) NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
-  description text NULL,
-  occurred_at timestamptz NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  FOREIGN KEY (user_id, account_id, currency)
+ALTER TABLE transactions
+  ADD COLUMN user_id uuid NOT NULL REFERENCES users (id),
+  ADD CONSTRAINT transactions_account_ownership_currency_fk
+    FOREIGN KEY (user_id, account_id, currency)
     REFERENCES accounts (user_id, id, currency),
-  FOREIGN KEY (user_id, category_id)
-    REFERENCES categories (user_id, id)
-);
+  ADD CONSTRAINT transactions_category_ownership_fk
+    FOREIGN KEY (user_id, category_id)
+    REFERENCES categories (user_id, id);
+
+DROP INDEX IF EXISTS idx_transactions_account_id;
+DROP INDEX IF EXISTS idx_transactions_occurred_at;
 
 CREATE INDEX idx_transactions_user_account
 ON transactions (user_id, account_id);
@@ -59,15 +58,14 @@ WHERE category_id IS NOT NULL;
 CREATE INDEX idx_transactions_user_occurred_at
 ON transactions (user_id, occurred_at DESC);
 
-CREATE TABLE idempotency_keys (
-  id uuid PRIMARY KEY,
-  user_id uuid NOT NULL REFERENCES users (id),
-  idempotency_key uuid NOT NULL,
-  request_hash text NOT NULL,
-  response jsonb NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (user_id, idempotency_key)
-);
+ALTER TABLE idempotency_keys
+  DROP CONSTRAINT IF EXISTS idempotency_keys_idempotency_key_key,
+  DROP CONSTRAINT IF EXISTS idempotency_keys_idempotency_key_request_hash_key,
+  ADD COLUMN user_id uuid NOT NULL REFERENCES users (id),
+  ADD CONSTRAINT idempotency_keys_user_key_unique
+    UNIQUE (user_id, idempotency_key);
+
+DROP INDEX IF EXISTS idx_idempotency_keys_key;
 
 CREATE TABLE refresh_sessions (
   id uuid PRIMARY KEY,
@@ -81,3 +79,5 @@ CREATE TABLE refresh_sessions (
 
 CREATE INDEX idx_refresh_sessions_family
 ON refresh_sessions (family_id);
+
+COMMIT;

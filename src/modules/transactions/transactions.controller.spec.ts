@@ -6,6 +6,7 @@ import {
 import { TransactionResponseDto } from './dto/transaction-response.dto';
 import { TransactionsController } from './transactions.controller';
 import { TransactionsService } from './transactions.service';
+import { AuthGuard, AuthenticatedRequest } from '../auth/auth.guard';
 
 describe('TransactionsController', () => {
   const dto: CreateTransactionDto = {
@@ -42,15 +43,24 @@ describe('TransactionsController', () => {
           useValue: { createTransaction },
         },
       ],
-    }).compile();
+    })
+      .overrideGuard(AuthGuard)
+      .useValue({ canActivate: jest.fn().mockReturnValue(true) })
+      .compile();
 
     controller = module.get<TransactionsController>(TransactionsController);
   });
 
   it('returns the transaction service response without exposing persistence rows', async () => {
     await expect(
-      controller.createTransaction(dto, idempotencyKey),
+      controller.createTransaction(dto, idempotencyKey, {
+        principal: { userId: '00000000-0000-4000-8000-000000000010' },
+      } as AuthenticatedRequest),
     ).resolves.toEqual(response);
-    expect(createTransaction).toHaveBeenCalledWith(dto, idempotencyKey);
+    expect(createTransaction).toHaveBeenCalledWith(
+      dto,
+      idempotencyKey,
+      '00000000-0000-4000-8000-000000000010',
+    );
   });
 });

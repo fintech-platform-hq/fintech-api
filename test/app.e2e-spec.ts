@@ -4,6 +4,7 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 import { DatabaseService } from './../src/common/database/database.service';
+import { AuthGuard } from './../src/modules/auth/auth.guard';
 
 interface StoredIdempotencyResult {
   requestHash: string;
@@ -11,6 +12,7 @@ interface StoredIdempotencyResult {
 }
 
 describe('Application contract (e2e)', () => {
+  const userId = '00000000-0000-4000-8000-000000000010';
   const requestBody = {
     accountId: '00000000-0000-4000-8000-000000000001',
     categoryId: '00000000-0000-4000-8000-000000000002',
@@ -28,7 +30,9 @@ describe('Application contract (e2e)', () => {
       const sql = text.replace(/\s+/g, ' ').trim();
 
       if (sql.startsWith('SELECT response, request_hash')) {
-        const result = idempotencyResults.get(parameters?.[0] as string);
+        const result = idempotencyResults.get(
+          `${String(parameters?.[0])}:${String(parameters?.[1])}`,
+        );
         return Promise.resolve({
           rows: result
             ? [
@@ -41,18 +45,26 @@ describe('Application contract (e2e)', () => {
         });
       }
 
+      if (sql.startsWith('SELECT currency')) {
+        return Promise.resolve({ rows: [{ currency: 'BRL' }] });
+      }
+
+      if (sql.startsWith('SELECT 1')) {
+        return Promise.resolve({ rows: [{ exists: 1 }] });
+      }
+
       if (sql.startsWith('INSERT INTO transactions')) {
         return Promise.resolve({
           rows: [
             {
               id: parameters?.[0],
-              account_id: parameters?.[1],
-              category_id: parameters?.[2],
-              type: parameters?.[3],
-              amount_minor: parameters?.[4],
-              currency: parameters?.[5],
-              description: parameters?.[6],
-              occurred_at: new Date(parameters?.[7] as string),
+              account_id: parameters?.[2],
+              category_id: parameters?.[3],
+              type: parameters?.[4],
+              amount_minor: parameters?.[5],
+              currency: parameters?.[6],
+              description: parameters?.[7],
+              occurred_at: new Date(parameters?.[8] as string),
               created_at: new Date('2026-07-30T18:00:01.000Z'),
             },
           ],
@@ -60,12 +72,15 @@ describe('Application contract (e2e)', () => {
       }
 
       if (sql.startsWith('INSERT INTO idempotency_keys')) {
-        const responseJSON = parameters?.[3] as string;
+        const responseJSON = parameters?.[4] as string;
         const response: unknown = JSON.parse(responseJSON);
-        idempotencyResults.set(parameters?.[1] as string, {
-          requestHash: parameters?.[2] as string,
-          response,
-        });
+        idempotencyResults.set(
+          `${String(parameters?.[1])}:${String(parameters?.[2])}`,
+          {
+            requestHash: parameters?.[3] as string,
+            response,
+          },
+        );
       }
 
       return Promise.resolve({ rows: [] });
@@ -76,11 +91,23 @@ describe('Application contract (e2e)', () => {
   let app: INestApplication<App>;
 
   beforeAll(async () => {
+    process.env.JWT_ACCESS_SECRET = '01234567890123456789012345678901';
+    process.env.JWT_ISSUER = 'fintech-api-test';
+    process.env.JWT_AUDIENCE = 'fintech-clients-test';
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
       .overrideProvider(DatabaseService)
       .useValue({ getClient })
+      .overrideGuard(AuthGuard)
+      .useValue({
+        canActivate: (context: {
+          switchToHttp: () => { getRequest: () => Record<string, unknown> };
+        }) => {
+          context.switchToHttp().getRequest().principal = { userId };
+          return true;
+        },
+      })
       .compile();
 
     app = moduleFixture.createNestApplication();

@@ -5,9 +5,10 @@ import { DatabaseModule } from './common/database/database.module';
 import { ErrorLoggingInterceptor } from './common/logging/error-logging.interceptor';
 import { RequestLoggingMiddleware } from './common/logging/request-logging.middleware';
 import { AppController } from './app.controller';
+import { AuthModule } from './modules/auth/auth.module';
 
 @Module({
-  imports: [DatabaseModule, TransactionsModule],
+  imports: [DatabaseModule, AuthModule, TransactionsModule],
   controllers: [AppController],
   providers: [
     {

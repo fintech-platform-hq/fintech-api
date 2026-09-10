@@ -22,6 +22,9 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/fintech
       NODE_ENV: development
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?JWT_ACCESS_SECRET is required}
+      JWT_ISSUER: ${JWT_ISSUER:?JWT_ISSUER is required}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:?JWT_AUDIENCE is required}
     ports:
       - "3000:3000"
     command: npm run start:prod

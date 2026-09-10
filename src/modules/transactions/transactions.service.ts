@@ -1,7 +1,9 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
   Injectable,
+  NotFoundException,
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
 import { isUUID } from 'class-validator';
@@ -20,6 +22,10 @@ interface IdempotencyKeyRow {
   request_hash: string;
 }
 
+interface AccountRow {
+  currency: string;
+}
+
 @Injectable()
 export class TransactionsService {
   constructor(private readonly db: DatabaseService) {}
@@ -27,6 +33,7 @@ export class TransactionsService {
   async createTransaction(
     dto: CreateTransactionDto,
     idempotencyKey: string,
+    userId: string,
   ): Promise<TransactionResponseDto> {
     if (!idempotencyKey) {
       throw new BadRequestException('Idempotency key required');
@@ -45,17 +52,17 @@ export class TransactionsService {
       await client.query('BEGIN');
 
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-        idempotencyKey,
+        `${userId}:${idempotencyKey}`,
       ]);
 
       const idempotencyResult = await client.query<IdempotencyKeyRow>(
         `
             SELECT response, request_hash
             FROM idempotency_keys
-            WHERE idempotency_key = $1
+            WHERE user_id = $1 AND idempotency_key = $2
             FOR UPDATE
           `,
-        [idempotencyKey],
+        [userId, idempotencyKey],
       );
 
       const existingIdempotencyKey = idempotencyResult.rows[0];
@@ -77,11 +84,46 @@ export class TransactionsService {
         );
       }
 
+      const accountResult = await client.query<AccountRow>(
+        `
+          SELECT currency
+          FROM accounts
+          WHERE user_id = $1 AND id = $2
+          FOR KEY SHARE
+        `,
+        [userId, dto.accountId],
+      );
+      const account = accountResult.rows[0];
+      if (!account) {
+        throw new NotFoundException('Account not found');
+      }
+      if (account.currency !== dto.currency) {
+        throw new BadRequestException(
+          'Transaction currency must match account currency',
+        );
+      }
+
+      if (dto.categoryId) {
+        const categoryResult = await client.query(
+          `
+            SELECT 1
+            FROM categories
+            WHERE user_id = $1 AND id = $2
+            FOR KEY SHARE
+          `,
+          [userId, dto.categoryId],
+        );
+        if (!categoryResult.rows[0]) {
+          throw new NotFoundException('Category not found');
+        }
+      }
+
       const transactionResult =
         await client.query<TransactionPersistenceRecord>(
           `
             INSERT INTO transactions (
               id,
+              user_id,
               account_id,
               category_id,
               type,
@@ -90,11 +132,12 @@ export class TransactionsService {
               description,
               occurred_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING *
           `,
           [
             randomUUID(),
+            userId,
             dto.accountId,
             dto.categoryId ?? null,
             dto.type,
@@ -113,13 +156,20 @@ export class TransactionsService {
         `
             INSERT INTO idempotency_keys (
               id,
+              user_id,
               idempotency_key,
               request_hash,
               response
             )
-            VALUES ($1, $2, $3, $4::jsonb)
+            VALUES ($1, $2, $3, $4, $5::jsonb)
           `,
-        [randomUUID(), idempotencyKey, requestHash, JSON.stringify(response)],
+        [
+          randomUUID(),
+          userId,
+          idempotencyKey,
+          requestHash,
+          JSON.stringify(response),
+        ],
       );
 
       await client.query('COMMIT');
@@ -128,10 +178,7 @@ export class TransactionsService {
     } catch (error) {
       await client.query('ROLLBACK');
 
-      if (
-        error instanceof ConflictException ||
-        error instanceof BadRequestException
-      ) {
+      if (error instanceof HttpException) {
         throw error;
       }
 
