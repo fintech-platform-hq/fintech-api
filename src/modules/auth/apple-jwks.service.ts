@@ -5,6 +5,7 @@ import { AppleAuthError } from './apple-auth.errors';
 
 const CACHE_TTL_MS = 60 * 60 * 1_000;
 const UNKNOWN_KID_REFRESH_COOLDOWN_MS = 60 * 1_000;
+const FAILED_REFRESH_BACKOFF_MS = 60 * 1_000;
 
 interface AppleJwk {
   alg: unknown;
@@ -25,13 +26,19 @@ export class AppleJwksService {
   private keys = new Map<string, CachedAppleKey>();
   private expiresAt = 0;
   private lastRefreshAttemptAt = Number.NEGATIVE_INFINITY;
+  private lastRefreshFailureAt = Number.NEGATIVE_INFINITY;
   private refreshPromise?: Promise<void>;
 
   constructor(private readonly appleApi: AppleApiClient) {}
 
   async getVerificationKey(kid: string): Promise<KeyObject> {
     const now = Date.now();
-    if (now >= this.expiresAt) await this.refresh();
+    if (now >= this.expiresAt) {
+      if (this.refreshPromise) await this.refreshPromise;
+      else if (now - this.lastRefreshFailureAt < FAILED_REFRESH_BACKOFF_MS) {
+        throw unavailableJwks();
+      } else await this.refresh();
+    }
 
     let entry = this.keys.get(kid);
     if (!entry && this.refreshPromise) {
@@ -63,6 +70,10 @@ export class AppleJwksService {
     this.refreshPromise = this.loadKeys();
     try {
       await this.refreshPromise;
+      this.lastRefreshFailureAt = Number.NEGATIVE_INFINITY;
+    } catch (error) {
+      this.lastRefreshFailureAt = Date.now();
+      throw error;
     } finally {
       this.refreshPromise = undefined;
     }

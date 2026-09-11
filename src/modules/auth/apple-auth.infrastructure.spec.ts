@@ -12,6 +12,7 @@ import { AppleAuthError } from './apple-auth.errors';
 import { AppleClientSecretService } from './apple-client-secret.service';
 import { AppleIdentityTokenVerifier } from './apple-identity-token.verifier';
 import { AppleJwksService } from './apple-jwks.service';
+import { AppleTokenService } from './apple-token.service';
 import { AuthConfig } from './auth.config';
 import { AuthModule } from './auth.module';
 
@@ -117,6 +118,164 @@ describe('Apple authentication infrastructure', () => {
         code: 'APPLE_JWKS_UNAVAILABLE',
       });
     });
+
+    it('exchanges an authorization code once with the exact token contract', async () => {
+      const payload = appleTokenResponse();
+      const fetchMock = jest
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(jsonResponse(payload));
+
+      await expect(
+        new AppleApiClient().exchangeAuthorizationCode(
+          'code + value',
+          CLIENT_ID,
+          'client.secret',
+        ),
+      ).resolves.toEqual({
+        accessToken: 'apple-access-token',
+        expiresIn: 3600,
+        idToken: 'header.payload.signature',
+        refreshToken: 'apple-refresh-token',
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, options] = fetchMock.mock.calls[0];
+      expect(url).toBe('https://appleid.apple.com/auth/token');
+      expect(options?.method).toBe('POST');
+      expect(options?.headers).toEqual({
+        Accept: 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      });
+      expect(options?.redirect).toBe('error');
+      expect(options?.signal).toBeInstanceOf(AbortSignal);
+      expect(options?.body).toBeInstanceOf(URLSearchParams);
+      expect((options?.body as URLSearchParams).toString()).toBe(
+        'client_id=com.example.fintech&client_secret=client.secret&code=code+%2B+value&grant_type=authorization_code',
+      );
+      expect((options?.body as URLSearchParams).has('redirect_uri')).toBe(
+        false,
+      );
+    });
+
+    it.each([
+      ['missing access token', { access_token: undefined }],
+      ['wrong token type', { token_type: 'mac' }],
+      ['non-positive expiry', { expires_in: 0 }],
+      ['non-integer expiry', { expires_in: 1.5 }],
+      ['missing refresh token', { refresh_token: undefined }],
+      ['missing identity token', { id_token: undefined }],
+    ])('rejects a token response with %s', async (_case, replacement) => {
+      jest
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(
+          jsonResponse({ ...appleTokenResponse(), ...replacement }),
+        );
+
+      await expect(
+        new AppleApiClient().exchangeAuthorizationCode(
+          'code',
+          CLIENT_ID,
+          'secret',
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_APPLE_TOKEN_RESPONSE' });
+    });
+
+    it('accepts the documented bearer token type case-insensitively', async () => {
+      jest
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(jsonResponse(appleTokenResponse('bearer')));
+
+      await expect(
+        new AppleApiClient().exchangeAuthorizationCode(
+          'code',
+          CLIENT_ID,
+          'secret',
+        ),
+      ).resolves.toMatchObject({ accessToken: 'apple-access-token' });
+    });
+
+    it.each([
+      ['invalid_grant', 'APPLE_AUTHORIZATION_CODE_REJECTED'],
+      ['invalid_client', 'INVALID_APPLE_CONFIGURATION'],
+      ['unauthorized_client', 'INVALID_APPLE_CONFIGURATION'],
+      ['invalid_request', 'APPLE_TOKEN_REQUEST_REJECTED'],
+      ['unsupported_grant_type', 'APPLE_TOKEN_REQUEST_REJECTED'],
+      ['invalid_scope', 'APPLE_TOKEN_REQUEST_REJECTED'],
+    ])(
+      'maps Apple error %s without exposing its request',
+      async (error, code) => {
+        jest
+          .spyOn(globalThis, 'fetch')
+          .mockResolvedValue(jsonResponse({ error }, { status: 400 }));
+
+        await expect(
+          new AppleApiClient().exchangeAuthorizationCode(
+            'sensitive-code',
+            CLIENT_ID,
+            'sensitive-secret',
+          ),
+        ).rejects.toMatchObject({ code });
+      },
+    );
+
+    it.each([
+      [
+        'unknown Apple error',
+        jsonResponse({ error: 'new_error' }, { status: 400 }),
+        'INVALID_APPLE_TOKEN_RESPONSE',
+      ],
+      [
+        'malformed JSON',
+        new Response('not-json', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+        'INVALID_APPLE_TOKEN_RESPONSE',
+      ],
+      [
+        'wrong content type',
+        new Response('{}', { status: 200 }),
+        'INVALID_APPLE_TOKEN_RESPONSE',
+      ],
+      [
+        'server failure',
+        new Response('', { status: 503 }),
+        'APPLE_TOKEN_API_UNAVAILABLE',
+      ],
+      [
+        'unexpected status',
+        new Response('', { status: 418 }),
+        'APPLE_TOKEN_API_UNAVAILABLE',
+      ],
+    ])('maps %s without retrying', async (_case, response, code) => {
+      const fetchMock = jest
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(response);
+
+      await expect(
+        new AppleApiClient().exchangeAuthorizationCode(
+          'code',
+          CLIENT_ID,
+          'secret',
+        ),
+      ).rejects.toMatchObject({ code });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('maps a network failure without retrying', async () => {
+      const fetchMock = jest
+        .spyOn(globalThis, 'fetch')
+        .mockRejectedValue(new Error('offline'));
+
+      await expect(
+        new AppleApiClient().exchangeAuthorizationCode(
+          'code',
+          CLIENT_ID,
+          'secret',
+        ),
+      ).rejects.toMatchObject({ code: 'APPLE_TOKEN_API_UNAVAILABLE' });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('AppleJwksService', () => {
@@ -147,6 +306,37 @@ describe('Apple authentication infrastructure', () => {
       await service.getVerificationKey('known');
 
       expect(fetchJwks).toHaveBeenCalledTimes(2);
+    });
+
+    it('backs off after an expired-cache refresh failure without using stale keys', async () => {
+      const unavailable = new AppleAuthError(
+        'APPLE_JWKS_UNAVAILABLE',
+        'unavailable',
+      );
+      const fetchJwks = jest
+        .fn()
+        .mockResolvedValueOnce({ keys: [rsaJwk('known')] })
+        .mockRejectedValueOnce(unavailable)
+        .mockResolvedValueOnce({ keys: [rsaJwk('known')] });
+      const service = jwksService(fetchJwks);
+      const now = jest.spyOn(Date, 'now').mockReturnValue(0);
+
+      await service.getVerificationKey('known');
+      now.mockReturnValue(3_600_000);
+      await expect(service.getVerificationKey('known')).rejects.toBe(
+        unavailable,
+      );
+      now.mockReturnValue(3_659_999);
+      await expect(service.getVerificationKey('known')).rejects.toMatchObject({
+        code: 'APPLE_JWKS_UNAVAILABLE',
+      });
+      expect(fetchJwks).toHaveBeenCalledTimes(2);
+
+      now.mockReturnValue(3_660_000);
+      await expect(service.getVerificationKey('known')).resolves.toBeInstanceOf(
+        KeyObject,
+      );
+      expect(fetchJwks).toHaveBeenCalledTimes(3);
     });
 
     it('shares one refresh across concurrent requests', async () => {
@@ -361,6 +551,25 @@ describe('Apple authentication infrastructure', () => {
         code: 'INVALID_IDENTITY_TOKEN',
       });
     });
+
+    it('validates a token-endpoint identity with an optional matching nonce', async () => {
+      const { verifier } = identityVerifier();
+      await expect(
+        verifier.verifyTokenResponse(identityToken(), 'expected-nonce'),
+      ).resolves.toEqual({ subject: 'apple-subject' });
+      await expect(
+        verifier.verifyTokenResponse(
+          identityToken({ nonce: undefined }),
+          'expected-nonce',
+        ),
+      ).resolves.toEqual({ subject: 'apple-subject' });
+      await expect(
+        verifier.verifyTokenResponse(
+          identityToken({ nonce: 'different' }),
+          'expected-nonce',
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_IDENTITY_TOKEN' });
+    });
   });
 
   describe('AppleClientSecretService', () => {
@@ -430,6 +639,112 @@ describe('Apple authentication infrastructure', () => {
     });
   });
 
+  describe('AppleTokenService', () => {
+    it('validates both identities and returns only subject and refresh token', async () => {
+      const verify = jest.fn().mockResolvedValue({ subject: 'apple-subject' });
+      const verifyTokenResponse = jest
+        .fn()
+        .mockResolvedValue({ subject: 'apple-subject' });
+      const exchangeAuthorizationCode = jest.fn().mockResolvedValue({
+        ...parsedAppleTokenResponse(),
+        idToken: 'exchanged-identity-token',
+      });
+      const generate = jest.fn().mockReturnValue('new-client-secret');
+      const service = appleTokenService({
+        verify,
+        verifyTokenResponse,
+        exchangeAuthorizationCode,
+        generate,
+      });
+
+      await expect(
+        service.exchangeAuthorizationCode(
+          'original-identity-token',
+          'authorization-code',
+          'expected-nonce',
+        ),
+      ).resolves.toEqual({
+        subject: 'apple-subject',
+        refreshToken: 'apple-refresh-token',
+      });
+      expect(verify).toHaveBeenCalledWith(
+        'original-identity-token',
+        'expected-nonce',
+      );
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(exchangeAuthorizationCode).toHaveBeenCalledWith(
+        'authorization-code',
+        CLIENT_ID,
+        'new-client-secret',
+      );
+      expect(verifyTokenResponse).toHaveBeenCalledWith(
+        'exchanged-identity-token',
+        'expected-nonce',
+      );
+    });
+
+    it('does not contact Apple when the original identity is invalid', async () => {
+      const invalid = new AppleAuthError('INVALID_IDENTITY_TOKEN', 'invalid');
+      const verify = jest.fn().mockRejectedValue(invalid);
+      const exchangeAuthorizationCode = jest.fn();
+      const service = appleTokenService({
+        verify,
+        exchangeAuthorizationCode,
+      });
+
+      await expect(
+        service.exchangeAuthorizationCode('identity', 'code', 'nonce'),
+      ).rejects.toBe(invalid);
+      expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
+    });
+
+    it('rejects a different subject from the exchanged identity token', async () => {
+      const service = appleTokenService({
+        verify: jest.fn().mockResolvedValue({ subject: 'original-subject' }),
+        verifyTokenResponse: jest
+          .fn()
+          .mockResolvedValue({ subject: 'different-subject' }),
+      });
+
+      await expect(
+        service.exchangeAuthorizationCode('identity', 'code', 'nonce'),
+      ).rejects.toMatchObject({ code: 'INVALID_IDENTITY_TOKEN' });
+    });
+
+    it('rejects an empty code without generating a secret or making a request', async () => {
+      const generate = jest.fn();
+      const exchangeAuthorizationCode = jest.fn();
+      const service = appleTokenService({
+        generate,
+        exchangeAuthorizationCode,
+      });
+
+      await expect(
+        service.exchangeAuthorizationCode('identity', '', 'nonce'),
+      ).rejects.toMatchObject({
+        code: 'APPLE_AUTHORIZATION_CODE_REJECTED',
+      });
+      expect(generate).not.toHaveBeenCalled();
+      expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
+    });
+
+    it('propagates an ambiguous exchange failure without retrying', async () => {
+      const unavailable = new AppleAuthError(
+        'APPLE_TOKEN_API_UNAVAILABLE',
+        'unavailable',
+      );
+      const exchangeAuthorizationCode = jest
+        .fn()
+        .mockRejectedValue(unavailable);
+      const service = appleTokenService({ exchangeAuthorizationCode });
+
+      await expect(
+        service.exchangeAuthorizationCode('identity', 'code', 'nonce'),
+      ).rejects.toBe(unavailable);
+      expect(exchangeAuthorizationCode).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('registers dormant Apple providers without requiring Apple environment', async () => {
     process.env.JWT_ACCESS_SECRET = '01234567890123456789012345678901';
     process.env.JWT_ISSUER = 'fintech-api-test';
@@ -445,6 +760,7 @@ describe('Apple authentication infrastructure', () => {
       .compile();
     expect(module.get(AppleIdentityTokenVerifier)).toBeDefined();
     expect(module.get(AppleClientSecretService)).toBeDefined();
+    expect(module.get(AppleTokenService)).toBeDefined();
     await module.close();
   });
 });
@@ -504,6 +820,61 @@ function clientSecretConfig(privateKey?: string): AuthConfig {
       privateKey ??
       ecKeys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
   } as AuthConfig;
+}
+
+function appleTokenResponse(tokenType = 'Bearer'): Record<string, unknown> {
+  return {
+    access_token: 'apple-access-token',
+    token_type: tokenType,
+    expires_in: 3600,
+    refresh_token: 'apple-refresh-token',
+    id_token: 'header.payload.signature',
+  };
+}
+
+function parsedAppleTokenResponse() {
+  return {
+    accessToken: 'apple-access-token',
+    expiresIn: 3600,
+    refreshToken: 'apple-refresh-token',
+    idToken: 'header.payload.signature',
+  };
+}
+
+function jsonResponse(value: unknown, init?: ResponseInit): Response {
+  return new Response(JSON.stringify(value), {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...init?.headers },
+  });
+}
+
+function appleTokenService(
+  overrides: {
+    verify?: jest.Mock;
+    verifyTokenResponse?: jest.Mock;
+    exchangeAuthorizationCode?: jest.Mock;
+    generate?: jest.Mock;
+  } = {},
+): AppleTokenService {
+  return new AppleTokenService(
+    {
+      exchangeAuthorizationCode:
+        overrides.exchangeAuthorizationCode ??
+        jest.fn().mockResolvedValue(parsedAppleTokenResponse()),
+    } as unknown as AppleApiClient,
+    {
+      generate: overrides.generate ?? jest.fn().mockReturnValue('secret'),
+    } as unknown as AppleClientSecretService,
+    {
+      verify:
+        overrides.verify ??
+        jest.fn().mockResolvedValue({ subject: 'apple-subject' }),
+      verifyTokenResponse:
+        overrides.verifyTokenResponse ??
+        jest.fn().mockResolvedValue({ subject: 'apple-subject' }),
+    } as unknown as AppleIdentityTokenVerifier,
+    { appleClientId: CLIENT_ID } as AuthConfig,
+  );
 }
 
 function encodeJson(value: object): string {

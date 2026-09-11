@@ -72,6 +72,34 @@ only to Apple's token endpoint.
 The backend creates a new five-minute `client_secret` for each token-endpoint
 request. It is never persisted or reused as an application session token.
 
+## Authorization code exchange
+
+The backend exchanges each native iOS authorization code exactly once with
+`POST https://appleid.apple.com/auth/token`. The request uses
+`application/x-www-form-urlencoded` with `client_id`, a newly generated
+`client_secret`, `code`, and `grant_type=authorization_code`. It omits
+`redirect_uri` because the native authorization request does not use one.
+
+The token response must contain a bearer access token, a positive expiry, an
+identity token, and a refresh token. The backend validates and discards the
+Apple access token in this checkpoint. The Apple refresh token remains opaque
+and is returned only to the internal caller for future encrypted persistence.
+
+The identity token received from iOS is validated first, including its nonce.
+The identity token returned by the token endpoint is independently validated
+with RS256 and must contain the same Apple `sub`. If the returned token contains
+a nonce, it must match in constant time; the two compact JWT strings do not
+need to be identical.
+
+The token exchange has a five-second timeout, rejects redirects, and performs
+no automatic retry. A timeout, disconnect, or malformed response is ambiguous:
+the same single-use authorization code must not be submitted again, and the
+client must start a new interactive authorization attempt.
+
+After a failed refresh of expired Apple JWKS, the backend waits one minute
+before attempting another refresh. It does not use expired keys during this
+backoff, and concurrent callers continue to share an in-flight refresh.
+
 ## Environment variables
 
 Only secret-managed deployment configuration may provide these values:

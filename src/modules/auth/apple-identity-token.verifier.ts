@@ -22,6 +22,21 @@ export class AppleIdentityTokenVerifier {
     identityToken: string,
     expectedNonce: string,
   ): Promise<VerifiedAppleIdentity> {
+    return this.verifyToken(identityToken, expectedNonce, true);
+  }
+
+  async verifyTokenResponse(
+    identityToken: string,
+    expectedNonce: string,
+  ): Promise<VerifiedAppleIdentity> {
+    return this.verifyToken(identityToken, expectedNonce, false);
+  }
+
+  private async verifyToken(
+    identityToken: string,
+    expectedNonce: string,
+    requireNonce: boolean,
+  ): Promise<VerifiedAppleIdentity> {
     try {
       if (!expectedNonce) throw invalidIdentityToken();
       const segments = identityToken.split('.');
@@ -62,8 +77,7 @@ export class AppleIdentityTokenVerifier {
         payload.iat >= payload.exp ||
         typeof payload.sub !== 'string' ||
         payload.sub.trim().length === 0 ||
-        typeof payload.nonce !== 'string' ||
-        !noncesMatch(payload.nonce, expectedNonce)
+        !validNonce(payload.nonce, expectedNonce, requireNonce)
       ) {
         throw invalidIdentityToken();
       }
@@ -74,6 +88,15 @@ export class AppleIdentityTokenVerifier {
       throw invalidIdentityToken();
     }
   }
+}
+
+function validNonce(
+  actual: unknown,
+  expected: string,
+  required: boolean,
+): boolean {
+  if (actual === undefined) return !required;
+  return typeof actual === 'string' && noncesMatch(actual, expected);
 }
 
 function decodeJson(segment: string): unknown {

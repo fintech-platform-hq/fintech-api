@@ -4,6 +4,7 @@ import { AppleApiClient } from './apple-api.client';
 import { AppleClientSecretService } from './apple-client-secret.service';
 import { AppleIdentityTokenVerifier } from './apple-identity-token.verifier';
 import { AppleJwksService } from './apple-jwks.service';
+import { AppleTokenService } from './apple-token.service';
 import { AuthConfig } from './auth.config';
 import { AuthController } from './auth.controller';
 import { AuthGuard } from './auth.guard';
@@ -22,6 +23,7 @@ import { AuthService } from './auth.service';
     AppleJwksService,
     AppleIdentityTokenVerifier,
     AppleClientSecretService,
+    AppleTokenService,
   ],
   exports: [AuthGuard, AuthService],
 })
