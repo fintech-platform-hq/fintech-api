@@ -2,6 +2,7 @@ import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { AuthResponse } from './auth.types';
 import { CredentialsDto } from './dto/credentials.dto';
+import { AppleAuthenticationDto } from './dto/apple-authentication.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 
 @Controller('auth')
@@ -17,6 +18,12 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   login(@Body() dto: CredentialsDto): Promise<AuthResponse> {
     return this.authService.login(dto);
+  }
+
+  @Post('apple')
+  @HttpCode(HttpStatus.OK)
+  apple(@Body() dto: AppleAuthenticationDto): Promise<AuthResponse> {
+    return this.authService.apple(dto);
   }
 
   @Post('refresh')

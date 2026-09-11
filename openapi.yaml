@@ -48,6 +48,29 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+  /auth/apple:
+    post:
+      summary: Authenticate with Sign in with Apple
+      operationId: authenticateWithApple
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppleAuthenticationRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/AuthTokens'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/AccountLinkRequired'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /auth/refresh:
     post:
       summary: Rotate a refresh token
@@ -226,6 +249,25 @@ components:
         refreshToken:
           type: string
           maxLength: 256
+    AppleAuthenticationRequest:
+      type: object
+      additionalProperties: false
+      required: [identityToken, authorizationCode, nonce]
+      properties:
+        identityToken:
+          type: string
+          minLength: 1
+          maxLength: 16384
+          description: Compact RS256 identity token returned by Apple.
+        authorizationCode:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Single-use authorization code returned by Apple.
+        nonce:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: Exact unpadded Base64URL raw nonce sent to Apple for this authorization attempt.
     AuthResponse:
       type: object
       additionalProperties: false
@@ -362,6 +404,20 @@ components:
                 type: string
         error:
           type: string
+    AccountLinkRequiredError:
+      type: object
+      additionalProperties: false
+      required: [statusCode, message, code]
+      properties:
+        statusCode:
+          type: integer
+          const: 409
+        message:
+          type: string
+          const: Account linking required
+        code:
+          type: string
+          const: ACCOUNT_LINK_REQUIRED
   responses:
     AuthTokens:
       description: Access token and a new opaque refresh token.
@@ -387,6 +443,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
+    AccountLinkRequired:
+      description: The verified Apple email belongs to another user; explicit linking is required.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AccountLinkRequiredError'
     Unauthorized:
       description: Missing, invalid, or expired authentication credential.
       content:
@@ -410,6 +472,12 @@ components:
       headers:
         X-Request-Id:
           $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnavailable:
+      description: Apple authentication is temporarily unavailable or misconfigured.
       content:
         application/json:
           schema:

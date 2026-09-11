@@ -45,6 +45,7 @@ The current API milestone provides:
 
 - Transaction creation with PostgreSQL persistence
 - Email/password authentication with 15-minute HS256 access tokens
+- Sign in with Apple through `POST /auth/apple`, issuing the same Fintech session contract
 - Opaque 30-day refresh tokens with rotation and reuse-family revocation
 - User-owned accounts and optional categories enforced by PostgreSQL constraints
 - Idempotent writes using the `Idempotency-Key` header
@@ -327,10 +328,16 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5432/fintech
 JWT_ACCESS_SECRET=<at-least-32-characters-from-a-secret-store>
 JWT_ISSUER=fintech-api
 JWT_AUDIENCE=fintech-clients
+APPLE_CLIENT_ID=<configured-apple-client-id>
+APPLE_TEAM_ID=<10-character-team-id>
+APPLE_KEY_ID=<10-character-key-id>
+APPLE_PRIVATE_KEY_P8=<secret-managed-private-key>
+APPLE_REFRESH_TOKEN_ENCRYPTION_KEY=<unpadded-base64url-32-byte-key>
 PORT=3000
 ```
 
-Do not commit real credentials or production connection strings.
+Apple configuration is loaded only when `/auth/apple` is used. Do not commit
+real credentials, encryption keys, or production connection strings.
 
 ### Start with Docker
 

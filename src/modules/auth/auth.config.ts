@@ -32,6 +32,19 @@ export class AuthConfig {
     return value.replace(/\\n/g, '\n');
   }
 
+  get appleRefreshTokenEncryptionKey(): Buffer {
+    const value = this.requiredAppleValue('APPLE_REFRESH_TOKEN_ENCRYPTION_KEY');
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+      throw invalidAppleEncryptionKey();
+    }
+
+    const key = Buffer.from(value, 'base64url');
+    if (key.length !== 32 || key.toString('base64url') !== value) {
+      throw invalidAppleEncryptionKey();
+    }
+    return key;
+  }
+
   private required(name: string, minimumLength = 1): string {
     const value = process.env[name];
 
@@ -68,4 +81,11 @@ export class AuthConfig {
 
     return value;
   }
+}
+
+function invalidAppleEncryptionKey(): AppleAuthError {
+  return new AppleAuthError(
+    'INVALID_APPLE_CONFIGURATION',
+    'APPLE_REFRESH_TOKEN_ENCRYPTION_KEY must be an unpadded Base64URL-encoded 32-byte key',
+  );
 }

@@ -8,6 +8,8 @@ import { AuthConfig } from './auth.config';
 export interface AppleAuthorizationExchange {
   subject: string;
   refreshToken: string;
+  email?: string;
+  isPrivateEmail: boolean;
 }
 
 @Injectable()
@@ -42,10 +44,23 @@ export class AppleTokenService {
     if (exchangedIdentity.subject !== originalIdentity.subject) {
       throw invalidIdentityToken();
     }
+    if (
+      originalIdentity.email &&
+      exchangedIdentity.email &&
+      originalIdentity.email !== exchangedIdentity.email
+    ) {
+      throw invalidIdentityToken();
+    }
+
+    const identityWithEmail = originalIdentity.email
+      ? originalIdentity
+      : exchangedIdentity;
 
     return {
       subject: originalIdentity.subject,
       refreshToken: response.refreshToken,
+      email: identityWithEmail.email,
+      isPrivateEmail: identityWithEmail.isPrivateEmail ?? false,
     };
   }
 }

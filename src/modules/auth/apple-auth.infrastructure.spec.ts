@@ -1,6 +1,7 @@
 import { Test } from '@nestjs/testing';
 import {
   constants,
+  createDecipheriv,
   generateKeyPairSync,
   KeyObject,
   sign,
@@ -12,6 +13,7 @@ import { AppleAuthError } from './apple-auth.errors';
 import { AppleClientSecretService } from './apple-client-secret.service';
 import { AppleIdentityTokenVerifier } from './apple-identity-token.verifier';
 import { AppleJwksService } from './apple-jwks.service';
+import { AppleRefreshTokenCipherService } from './apple-refresh-token-cipher.service';
 import { AppleTokenService } from './apple-token.service';
 import { AuthConfig } from './auth.config';
 import { AuthModule } from './auth.module';
@@ -33,6 +35,7 @@ describe('Apple authentication infrastructure', () => {
       'APPLE_TEAM_ID',
       'APPLE_KEY_ID',
       'APPLE_PRIVATE_KEY_P8',
+      'APPLE_REFRESH_TOKEN_ENCRYPTION_KEY',
     ] as const;
     const original = new Map(names.map((name) => [name, process.env[name]]));
 
@@ -68,6 +71,21 @@ describe('Apple authentication infrastructure', () => {
       expect(config.appleTeamId).toBe('TEAMID1234');
       expect(config.appleKeyId).toBe('KEYID12345');
       expect(config.applePrivateKeyP8).toContain('\nvalue\n');
+    });
+
+    it('accepts only a canonical 32-byte Apple refresh-token key', () => {
+      process.env.APPLE_REFRESH_TOKEN_ENCRYPTION_KEY = Buffer.alloc(
+        32,
+        7,
+      ).toString('base64url');
+      expect(new AuthConfig().appleRefreshTokenEncryptionKey).toEqual(
+        Buffer.alloc(32, 7),
+      );
+
+      process.env.APPLE_REFRESH_TOKEN_ENCRYPTION_KEY = 'too-short';
+      expect(() => new AuthConfig().appleRefreshTokenEncryptionKey).toThrow(
+        AppleAuthError,
+      );
     });
 
     it.each([
@@ -451,6 +469,33 @@ describe('Apple authentication infrastructure', () => {
       expect(getVerificationKey).toHaveBeenCalledWith('apple-key');
     });
 
+    it('returns only verified normalized Apple email metadata', async () => {
+      const { verifier } = identityVerifier();
+      await expect(
+        verifier.verify(
+          identityToken({
+            email: ' Relay@PrivateRelay.AppleID.com ',
+            email_verified: 'true',
+            is_private_email: 'true',
+          }),
+          'expected-nonce',
+        ),
+      ).resolves.toEqual({
+        subject: 'apple-subject',
+        email: 'relay@privaterelay.appleid.com',
+        isPrivateEmail: true,
+      });
+      await expect(
+        verifier.verify(
+          identityToken({
+            email: 'ignored@example.com',
+            email_verified: false,
+          }),
+          'expected-nonce',
+        ),
+      ).resolves.toEqual({ subject: 'apple-subject' });
+    });
+
     it.each(['none', 'HS256', 'ES256'])(
       'rejects %s before requesting a verification key',
       async (algorithm) => {
@@ -639,9 +684,47 @@ describe('Apple authentication infrastructure', () => {
     });
   });
 
+  describe('AppleRefreshTokenCipherService', () => {
+    it('encrypts with a versioned AES-256-GCM envelope bound to the identity', () => {
+      const key = Buffer.alloc(32, 9);
+      const service = new AppleRefreshTokenCipherService({
+        appleRefreshTokenEncryptionKey: key,
+      } as AuthConfig);
+      const identityId = '30000000-0000-4000-8000-000000000001';
+
+      const encrypted = service.encrypt('sensitive-refresh-token', identityId);
+      const [version, encodedIv, encodedCiphertext, encodedTag] =
+        encrypted.split('.');
+      expect(version).toBe('v1');
+      expect(encrypted).not.toContain('sensitive-refresh-token');
+
+      const decipher = createDecipheriv(
+        'aes-256-gcm',
+        key,
+        Buffer.from(encodedIv, 'base64url'),
+      );
+      decipher.setAAD(
+        Buffer.from(`apple-refresh-token:v1:${identityId}`, 'utf8'),
+      );
+      decipher.setAuthTag(Buffer.from(encodedTag, 'base64url'));
+      const plaintext = Buffer.concat([
+        decipher.update(Buffer.from(encodedCiphertext, 'base64url')),
+        decipher.final(),
+      ]).toString('utf8');
+      expect(plaintext).toBe('sensitive-refresh-token');
+      expect(service.encrypt('sensitive-refresh-token', identityId)).not.toBe(
+        encrypted,
+      );
+    });
+  });
+
   describe('AppleTokenService', () => {
-    it('validates both identities and returns only subject and refresh token', async () => {
-      const verify = jest.fn().mockResolvedValue({ subject: 'apple-subject' });
+    it('validates both identities and returns subject, refresh token, and verified metadata', async () => {
+      const verify = jest.fn().mockResolvedValue({
+        subject: 'apple-subject',
+        email: 'relay@privaterelay.appleid.com',
+        isPrivateEmail: true,
+      });
       const verifyTokenResponse = jest
         .fn()
         .mockResolvedValue({ subject: 'apple-subject' });
@@ -666,6 +749,8 @@ describe('Apple authentication infrastructure', () => {
       ).resolves.toEqual({
         subject: 'apple-subject',
         refreshToken: 'apple-refresh-token',
+        email: 'relay@privaterelay.appleid.com',
+        isPrivateEmail: true,
       });
       expect(verify).toHaveBeenCalledWith(
         'original-identity-token',
@@ -681,6 +766,23 @@ describe('Apple authentication infrastructure', () => {
         'exchanged-identity-token',
         'expected-nonce',
       );
+    });
+
+    it('rejects conflicting verified emails between the two identity tokens', async () => {
+      const service = appleTokenService({
+        verify: jest.fn().mockResolvedValue({
+          subject: 'apple-subject',
+          email: 'first@example.com',
+        }),
+        verifyTokenResponse: jest.fn().mockResolvedValue({
+          subject: 'apple-subject',
+          email: 'second@example.com',
+        }),
+      });
+
+      await expect(
+        service.exchangeAuthorizationCode('identity', 'code', 'nonce'),
+      ).rejects.toMatchObject({ code: 'INVALID_IDENTITY_TOKEN' });
     });
 
     it('does not contact Apple when the original identity is invalid', async () => {
@@ -753,6 +855,7 @@ describe('Apple authentication infrastructure', () => {
     delete process.env.APPLE_TEAM_ID;
     delete process.env.APPLE_KEY_ID;
     delete process.env.APPLE_PRIVATE_KEY_P8;
+    delete process.env.APPLE_REFRESH_TOKEN_ENCRYPTION_KEY;
 
     const module = await Test.createTestingModule({ imports: [AuthModule] })
       .overrideProvider(DatabaseService)
@@ -761,6 +864,7 @@ describe('Apple authentication infrastructure', () => {
     expect(module.get(AppleIdentityTokenVerifier)).toBeDefined();
     expect(module.get(AppleClientSecretService)).toBeDefined();
     expect(module.get(AppleTokenService)).toBeDefined();
+    expect(module.get(AppleRefreshTokenCipherService)).toBeDefined();
     await module.close();
   });
 });

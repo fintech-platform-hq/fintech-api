@@ -1,6 +1,7 @@
 import {
   ConflictException,
   Injectable,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import {
@@ -15,7 +16,14 @@ import { promisify } from 'util';
 import { isUUID } from 'class-validator';
 import { DatabaseService } from '../../common/database/database.service';
 import { AuthConfig } from './auth.config';
-import { AuthPrincipal, AuthResponse } from './auth.types';
+import { AuthMethod, AuthPrincipal, AuthResponse } from './auth.types';
+import { AppleAuthError } from './apple-auth.errors';
+import { AppleRefreshTokenCipherService } from './apple-refresh-token-cipher.service';
+import {
+  AppleAuthorizationExchange,
+  AppleTokenService,
+} from './apple-token.service';
+import { AppleAuthenticationDto } from './dto/apple-authentication.dto';
 import { CredentialsDto } from './dto/credentials.dto';
 
 const scrypt = promisify(nodeScrypt);
@@ -27,6 +35,7 @@ interface UserRow {
 
 interface RefreshSessionRow {
   user_id: string;
+  auth_identity_id: string | null;
   family_id: string;
   expires_at: Date;
   revoked_at: Date | null;
@@ -39,6 +48,12 @@ interface JwtPayload {
   iat: unknown;
   exp: unknown;
   jti: unknown;
+  auth_method?: unknown;
+}
+
+interface AuthIdentityRow {
+  id: string;
+  user_id: string;
 }
 
 @Injectable()
@@ -46,6 +61,8 @@ export class AuthService {
   constructor(
     private readonly db: DatabaseService,
     private readonly config: AuthConfig,
+    private readonly appleTokens: AppleTokenService,
+    private readonly appleRefreshTokens: AppleRefreshTokenCipherService,
   ) {}
 
   async register(dto: CredentialsDto): Promise<AuthResponse> {
@@ -65,6 +82,7 @@ export class AuthService {
         userId,
         randomUUID(),
         refresh.hash,
+        null,
       );
       await client.query('COMMIT');
     } catch (error) {
@@ -77,7 +95,7 @@ export class AuthService {
       client.release();
     }
 
-    return this.authResponse(userId, refresh.token);
+    return this.authResponse(userId, refresh.token, 'password');
   }
 
   async login(dto: CredentialsDto): Promise<AuthResponse> {
@@ -104,7 +122,22 @@ export class AuthService {
       [randomUUID(), user.id, randomUUID(), refresh.hash],
     );
 
-    return this.authResponse(user.id, refresh.token);
+    return this.authResponse(user.id, refresh.token, 'password');
+  }
+
+  async apple(dto: AppleAuthenticationDto): Promise<AuthResponse> {
+    try {
+      this.appleRefreshTokens.assertConfigured();
+      const authorization = await this.appleTokens.exchangeAuthorizationCode(
+        dto.identityToken,
+        dto.authorizationCode,
+        dto.nonce,
+      );
+      return await this.createAppleSession(authorization);
+    } catch (error) {
+      if (error instanceof AppleAuthError) this.throwPublicAppleError(error);
+      throw error;
+    }
   }
 
   async refresh(refreshToken: string): Promise<AuthResponse> {
@@ -117,7 +150,7 @@ export class AuthService {
       transactionOpen = true;
       const result = await client.query<RefreshSessionRow>(
         `
-          SELECT user_id, family_id, expires_at, revoked_at
+          SELECT user_id, auth_identity_id, family_id, expires_at, revoked_at
           FROM refresh_sessions
           WHERE token_hash = $1
         `,
@@ -135,7 +168,7 @@ export class AuthService {
 
       const lockedResult = await client.query<RefreshSessionRow>(
         `
-          SELECT user_id, family_id, expires_at, revoked_at
+          SELECT user_id, auth_identity_id, family_id, expires_at, revoked_at
           FROM refresh_sessions
           WHERE token_hash = $1
           FOR UPDATE
@@ -178,11 +211,16 @@ export class AuthService {
         session.user_id,
         session.family_id,
         nextRefresh.hash,
+        session.auth_identity_id,
       );
       await client.query('COMMIT');
       transactionOpen = false;
 
-      return this.authResponse(session.user_id, nextRefresh.token);
+      return this.authResponse(
+        session.user_id,
+        nextRefresh.token,
+        session.auth_identity_id ? 'apple' : 'password',
+      );
     } catch (error) {
       if (transactionOpen) {
         await client.query('ROLLBACK');
@@ -243,22 +281,145 @@ export class AuthService {
         throw new Error('Invalid JWT claims');
       }
 
-      return { userId: payload.sub };
+      if (
+        payload.auth_method !== undefined &&
+        payload.auth_method !== 'password' &&
+        payload.auth_method !== 'apple'
+      ) {
+        throw new Error('Invalid authentication method');
+      }
+
+      return {
+        userId: payload.sub,
+        authMethod: payload.auth_method,
+      };
     } catch {
       throw new UnauthorizedException();
     }
   }
 
-  private authResponse(userId: string, refreshToken: string): AuthResponse {
+  private async createAppleSession(
+    authorization: AppleAuthorizationExchange,
+  ): Promise<AuthResponse> {
+    const client = await this.db.getClient();
+    const refresh = this.newRefreshToken();
+    let transactionOpen = false;
+
+    try {
+      await client.query('BEGIN');
+      transactionOpen = true;
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`apple:${authorization.subject}`],
+      );
+
+      const existing = await client.query<AuthIdentityRow>(
+        `
+          SELECT id, user_id
+          FROM auth_identities
+          WHERE provider = 'apple' AND provider_subject = $1
+        `,
+        [authorization.subject],
+      );
+      let identityId = existing.rows[0]?.id;
+      let userId = existing.rows[0]?.user_id;
+
+      if (identityId && userId) {
+        const ciphertext = this.appleRefreshTokens.encrypt(
+          authorization.refreshToken,
+          identityId,
+        );
+        await client.query(
+          `
+            UPDATE auth_identities
+            SET provider_email = COALESCE($1, provider_email),
+                is_private_email = CASE
+                  WHEN $1 IS NULL THEN is_private_email
+                  ELSE $2
+                END,
+                provider_refresh_token_ciphertext = $3,
+                last_provider_validation_at = now(),
+                revoked_at = NULL
+            WHERE id = $4
+          `,
+          [
+            authorization.email ?? null,
+            authorization.isPrivateEmail,
+            ciphertext,
+            identityId,
+          ],
+        );
+      } else {
+        if (authorization.email) {
+          const collision = await client.query(
+            'SELECT 1 FROM users WHERE email = $1',
+            [authorization.email],
+          );
+          if (collision.rowCount) throw accountLinkRequired();
+        }
+
+        userId = randomUUID();
+        identityId = randomUUID();
+        const ciphertext = this.appleRefreshTokens.encrypt(
+          authorization.refreshToken,
+          identityId,
+        );
+        await client.query(
+          'INSERT INTO users (id, email, password_hash) VALUES ($1, $2, NULL)',
+          [userId, authorization.email ?? null],
+        );
+        await client.query(
+          `
+            INSERT INTO auth_identities (
+              id, user_id, provider, provider_subject, provider_email,
+              is_private_email, provider_refresh_token_ciphertext,
+              last_provider_validation_at
+            ) VALUES ($1, $2, 'apple', $3, $4, $5, $6, now())
+          `,
+          [
+            identityId,
+            userId,
+            authorization.subject,
+            authorization.email ?? null,
+            authorization.isPrivateEmail,
+            ciphertext,
+          ],
+        );
+      }
+
+      await this.insertRefreshSession(
+        client,
+        userId,
+        randomUUID(),
+        refresh.hash,
+        identityId,
+      );
+      await client.query('COMMIT');
+      transactionOpen = false;
+      return this.authResponse(userId, refresh.token, 'apple');
+    } catch (error) {
+      if (transactionOpen) await client.query('ROLLBACK');
+      if (isUsersEmailConflict(error)) throw accountLinkRequired();
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  private authResponse(
+    userId: string,
+    refreshToken: string,
+    authMethod: AuthMethod,
+  ): AuthResponse {
     return {
-      accessToken: this.signAccessToken(userId),
+      accessToken: this.signAccessToken(userId, authMethod),
       refreshToken,
       tokenType: 'Bearer',
       expiresIn: 900,
     };
   }
 
-  private signAccessToken(userId: string): string {
+  private signAccessToken(userId: string, authMethod: AuthMethod): string {
     const now = Math.floor(Date.now() / 1000);
     const header = this.encodeJson({ alg: 'HS256', typ: 'JWT' });
     const payload = this.encodeJson({
@@ -268,6 +429,7 @@ export class AuthService {
       iat: now,
       exp: now + this.config.accessTokenSeconds,
       jti: randomUUID(),
+      auth_method: authMethod,
     });
     const signature = createHmac('sha256', this.config.jwtSecret)
       .update(`${header}.${payload}`)
@@ -330,14 +492,45 @@ export class AuthService {
     userId: string,
     familyId: string,
     tokenHash: string,
+    authIdentityId: string | null,
   ): Promise<void> {
     await client.query(
       `
         INSERT INTO refresh_sessions (
-          id, user_id, family_id, token_hash, expires_at
-        ) VALUES ($1, $2, $3, $4, now() + interval '30 days')
+          id, user_id, auth_identity_id, family_id, token_hash, expires_at
+        ) VALUES ($1, $2, $3, $4, $5, now() + interval '30 days')
       `,
-      [randomUUID(), userId, familyId, tokenHash],
+      [randomUUID(), userId, authIdentityId, familyId, tokenHash],
     );
   }
+
+  private throwPublicAppleError(error: AppleAuthError): never {
+    if (
+      error.code === 'INVALID_IDENTITY_TOKEN' ||
+      error.code === 'UNKNOWN_APPLE_KID' ||
+      error.code === 'APPLE_AUTHORIZATION_CODE_REJECTED' ||
+      error.code === 'APPLE_TOKEN_REQUEST_REJECTED'
+    ) {
+      throw new UnauthorizedException('Invalid Apple authentication');
+    }
+    throw new ServiceUnavailableException(
+      'Apple authentication is temporarily unavailable',
+    );
+  }
+}
+
+function accountLinkRequired(): ConflictException {
+  return new ConflictException({
+    statusCode: 409,
+    message: 'Account linking required',
+    code: 'ACCOUNT_LINK_REQUIRED',
+  });
+}
+
+function isUsersEmailConflict(error: unknown): boolean {
+  const databaseError = error as { code?: unknown; constraint?: unknown };
+  return (
+    databaseError.code === '23505' &&
+    databaseError.constraint === 'users_email_key'
+  );
 }

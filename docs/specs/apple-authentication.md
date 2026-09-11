@@ -1,9 +1,9 @@
 # Apple Authentication Contract
 
-Status: planned contract — not part of the published API.
+Status: `POST /auth/apple` implemented; explicit account linking remains planned.
 
-This specification is intentionally separate from `openapi.yaml` until the
-corresponding endpoints are implemented and available in the live API.
+The implemented Apple authentication endpoint is published in `openapi.yaml`.
+The future linking endpoint remains only in this specification.
 
 ## Endpoints
 
@@ -22,6 +22,11 @@ its shape: `accessToken`, `refreshToken`, `tokenType: Bearer`, and
 If the Apple `sub` is not linked but its email matches an existing user, the
 backend returns HTTP 409 with `code: ACCOUNT_LINK_REQUIRED`. Email matching
 never performs a silent merge.
+
+For a new identity, a verified Apple email is stored as metadata in both
+`users.email` and `auth_identities.provider_email`; absence of email is valid.
+The Apple `sub`, never email, remains the authoritative external identity.
+Later logins without email preserve existing metadata.
 
 ### `POST /auth/apple/link`
 
@@ -83,7 +88,7 @@ The backend exchanges each native iOS authorization code exactly once with
 The token response must contain a bearer access token, a positive expiry, an
 identity token, and a refresh token. The backend validates and discards the
 Apple access token in this checkpoint. The Apple refresh token remains opaque
-and is returned only to the internal caller for future encrypted persistence.
+and is persisted encrypted at rest with AES-256-GCM.
 
 The identity token received from iOS is validated first, including its nonce.
 The identity token returned by the token endpoint is independently validated
@@ -121,8 +126,14 @@ one `users.id`. Apple `sub` is the stable external identity; email, including
 private relay email, is metadata and a possible explicit-linking signal only.
 
 `refresh_sessions.auth_identity_id` is nullable for existing email/password
-sessions. When populated in a future Apple flow, a composite foreign key also
-requires the identity and session to belong to the same user.
+sessions. Apple sessions populate it, and the composite foreign key requires
+the identity and session to belong to the same user. Refresh rotation preserves
+this value and the signed `auth_method` claim.
+
+Apple refresh tokens are encrypted at rest with AES-256-GCM. The versioned
+envelope is `v1.<iv>.<ciphertext>.<tag>` using unpadded Base64URL fields, a
+random 96-bit IV, and AAD bound to the `auth_identities.id`. Fintech refresh
+tokens remain opaque to clients and hash-only in the database.
 
 ## Deferred provider validation
 

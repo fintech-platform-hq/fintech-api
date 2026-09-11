@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { constants, timingSafeEqual, verify as verifySignature } from 'crypto';
+import { isEmail } from 'class-validator';
 import { AppleAuthError } from './apple-auth.errors';
 import { AppleJwksService } from './apple-jwks.service';
 import { AuthConfig } from './auth.config';
@@ -9,6 +10,8 @@ const CLOCK_SKEW_SECONDS = 60;
 
 export interface VerifiedAppleIdentity {
   subject: string;
+  email?: string;
+  isPrivateEmail?: boolean;
 }
 
 @Injectable()
@@ -82,12 +85,35 @@ export class AppleIdentityTokenVerifier {
         throw invalidIdentityToken();
       }
 
-      return { subject: payload.sub };
+      return { subject: payload.sub, ...verifiedEmail(payload) };
     } catch (error) {
       if (error instanceof AppleAuthError) throw error;
       throw invalidIdentityToken();
     }
   }
+}
+
+function verifiedEmail(
+  payload: Record<string, unknown>,
+): Pick<VerifiedAppleIdentity, 'email' | 'isPrivateEmail'> {
+  if (
+    typeof payload.email !== 'string' ||
+    !isVerified(payload.email_verified)
+  ) {
+    return {};
+  }
+
+  const email = payload.email.trim().toLowerCase();
+  if (!email || email.length > 254 || !isEmail(email)) return {};
+  return {
+    email,
+    isPrivateEmail:
+      payload.is_private_email === true || payload.is_private_email === 'true',
+  };
+}
+
+function isVerified(value: unknown): boolean {
+  return value === true || value === 'true';
 }
 
 function validNonce(

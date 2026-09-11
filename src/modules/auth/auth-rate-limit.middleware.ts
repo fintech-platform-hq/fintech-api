@@ -15,6 +15,7 @@ const WINDOW_MS = 15 * 60 * 1000;
 const LIMITS: Record<string, number> = {
   '/auth/register': 5,
   '/auth/login': 5,
+  '/auth/apple': 5,
   '/auth/refresh': 10,
   '/auth/logout': 30,
 };
