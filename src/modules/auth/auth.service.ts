@@ -22,7 +22,7 @@ const scrypt = promisify(nodeScrypt);
 
 interface UserRow {
   id: string;
-  password_hash: string;
+  password_hash: string | null;
 }
 
 interface RefreshSessionRow {
@@ -86,7 +86,7 @@ export class AuthService {
       [dto.email],
     );
     const user = result.rows[0];
-    const passwordMatches = user
+    const passwordMatches = user?.password_hash
       ? await this.verifyPassword(dto.password, user.password_hash)
       : await this.consumeScrypt(dto.password);
 

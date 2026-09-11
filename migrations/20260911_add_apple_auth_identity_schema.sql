@@ -1,74 +1,10 @@
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'transaction_type') THEN
-    CREATE TYPE transaction_type AS ENUM ('expense', 'income');
-  END IF;
-END
-$$;
+BEGIN;
 
-CREATE TABLE users (
-  id uuid PRIMARY KEY,
-  email varchar(254) UNIQUE,
-  password_hash text,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  CHECK (email IS NULL OR email = lower(btrim(email))),
-  CHECK (password_hash IS NULL OR email IS NOT NULL)
-);
-
-CREATE TABLE accounts (
-  id uuid PRIMARY KEY,
-  user_id uuid NOT NULL REFERENCES users (id),
-  name text NOT NULL CHECK (length(btrim(name)) > 0),
-  currency char(3) NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (user_id, id),
-  UNIQUE (user_id, id, currency)
-);
-
-CREATE TABLE categories (
-  id uuid PRIMARY KEY,
-  user_id uuid NOT NULL REFERENCES users (id),
-  name text NOT NULL CHECK (length(btrim(name)) > 0),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (user_id, id)
-);
-
-CREATE TABLE transactions (
-  id uuid PRIMARY KEY,
-  user_id uuid NOT NULL REFERENCES users (id),
-  account_id uuid NOT NULL,
-  category_id uuid NULL,
-  type transaction_type NOT NULL,
-  amount_minor integer NOT NULL CHECK (amount_minor > 0),
-  currency char(3) NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
-  description text NULL,
-  occurred_at timestamptz NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  FOREIGN KEY (user_id, account_id, currency)
-    REFERENCES accounts (user_id, id, currency),
-  FOREIGN KEY (user_id, category_id)
-    REFERENCES categories (user_id, id)
-);
-
-CREATE INDEX idx_transactions_user_account
-ON transactions (user_id, account_id);
-
-CREATE INDEX idx_transactions_user_category
-ON transactions (user_id, category_id)
-WHERE category_id IS NOT NULL;
-
-CREATE INDEX idx_transactions_user_occurred_at
-ON transactions (user_id, occurred_at DESC);
-
-CREATE TABLE idempotency_keys (
-  id uuid PRIMARY KEY,
-  user_id uuid NOT NULL REFERENCES users (id),
-  idempotency_key uuid NOT NULL,
-  request_hash text NOT NULL,
-  response jsonb NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (user_id, idempotency_key)
-);
+ALTER TABLE users
+  ALTER COLUMN email DROP NOT NULL,
+  ALTER COLUMN password_hash DROP NOT NULL,
+  ADD CONSTRAINT users_password_requires_email_check
+    CHECK (password_hash IS NULL OR email IS NOT NULL);
 
 CREATE TABLE auth_identities (
   id uuid PRIMARY KEY,
@@ -164,22 +100,14 @@ CREATE TRIGGER auth_identities_user_id_immutable
 BEFORE UPDATE OF user_id ON auth_identities
 FOR EACH ROW EXECUTE FUNCTION prevent_auth_identity_reparenting();
 
-CREATE TABLE refresh_sessions (
-  id uuid PRIMARY KEY,
-  user_id uuid NOT NULL REFERENCES users (id),
-  auth_identity_id uuid NULL,
-  family_id uuid NOT NULL,
-  token_hash char(64) NOT NULL UNIQUE,
-  expires_at timestamptz NOT NULL,
-  revoked_at timestamptz NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  FOREIGN KEY (auth_identity_id, user_id)
-    REFERENCES auth_identities (id, user_id)
-);
-
-CREATE INDEX idx_refresh_sessions_family
-ON refresh_sessions (family_id);
+ALTER TABLE refresh_sessions
+  ADD COLUMN auth_identity_id uuid NULL,
+  ADD CONSTRAINT refresh_sessions_auth_identity_owner_fk
+    FOREIGN KEY (auth_identity_id, user_id)
+    REFERENCES auth_identities (id, user_id);
 
 CREATE INDEX idx_refresh_sessions_auth_identity
 ON refresh_sessions (auth_identity_id, user_id)
 WHERE auth_identity_id IS NOT NULL;
+
+COMMIT;
