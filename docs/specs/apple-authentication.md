@@ -60,9 +60,17 @@ a new nonce and authorization code.
 The Apple `identityToken` is signed by Apple with **RS256** and is verified by
 the backend using Apple's RSA JWKS (`kty=RSA`, `n`, and `e`).
 
+The backend keeps the JWKS in process memory for one hour and performs an
+early refresh when a token uses an unknown `kid`. Unknown-key refreshes are
+limited to one per minute, and concurrent refreshes share the same request.
+Expired keys are not used when a refresh fails.
+
 The `client_secret` is a different JWT created by the backend, signed with
 **ES256** using the backend's Sign in with Apple `.p8` private key, and sent
 only to Apple's token endpoint.
+
+The backend creates a new five-minute `client_secret` for each token-endpoint
+request. It is never persisted or reused as an application session token.
 
 ## Environment variables
 
