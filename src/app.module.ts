@@ -6,9 +6,10 @@ import { ErrorLoggingInterceptor } from './common/logging/error-logging.intercep
 import { RequestLoggingMiddleware } from './common/logging/request-logging.middleware';
 import { AppController } from './app.controller';
 import { AuthModule } from './modules/auth/auth.module';
+import { AccountsModule } from './modules/accounts/accounts.module';
 
 @Module({
-  imports: [DatabaseModule, AuthModule, TransactionsModule],
+  imports: [DatabaseModule, AuthModule, AccountsModule, TransactionsModule],
   controllers: [AppController],
   providers: [
     {
