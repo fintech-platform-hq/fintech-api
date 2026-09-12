@@ -16,6 +16,7 @@ const LIMITS: Record<string, number> = {
   '/auth/register': 5,
   '/auth/login': 5,
   '/auth/apple': 5,
+  '/auth/apple/link': 5,
   '/auth/refresh': 10,
   '/auth/logout': 30,
 };
@@ -26,14 +27,15 @@ export class AuthRateLimitMiddleware implements NestMiddleware {
   private readonly counters = new Map<string, Counter>();
 
   use(request: Request, response: Response, next: NextFunction): void {
-    const limit = LIMITS[request.path];
+    const bucketPath = request.path.toLowerCase().replace(/\/+$/, '') || '/';
+    const limit = LIMITS[bucketPath];
     if (!limit) {
       next();
       return;
     }
 
     const now = Date.now();
-    const key = `${request.ip}:${request.path}`;
+    const key = `${request.ip}:${bucketPath}`;
     const current = this.counters.get(key);
     const counter =
       !current || current.resetAt <= now

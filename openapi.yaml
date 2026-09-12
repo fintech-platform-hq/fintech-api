@@ -71,6 +71,33 @@ paths:
           $ref: '#/components/responses/TooManyRequests'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /auth/apple/link:
+    post:
+      summary: Explicitly link a Sign in with Apple identity
+      operationId: linkAppleIdentity
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppleAuthenticationRequest'
+      responses:
+        '204':
+          description: Apple identity linked; the current session remains valid.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /auth/refresh:
     post:
       summary: Rotate a refresh token
@@ -451,6 +478,12 @@ components:
             $ref: '#/components/schemas/AccountLinkRequiredError'
     Unauthorized:
       description: Missing, invalid, or expired authentication credential.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: A valid credential does not have the required password-origin authentication method.
       content:
         application/json:
           schema:

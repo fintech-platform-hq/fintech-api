@@ -1,9 +1,9 @@
 # Apple Authentication Contract
 
-Status: `POST /auth/apple` implemented; explicit account linking remains planned.
+Status: `POST /auth/apple` and explicit account linking are implemented.
 
-The implemented Apple authentication endpoint is published in `openapi.yaml`.
-The future linking endpoint remains only in this specification.
+The implemented Apple authentication and linking endpoints are published in
+`openapi.yaml`.
 
 ## Endpoints
 
@@ -30,11 +30,13 @@ Later logins without email preserve existing metadata.
 
 ### `POST /auth/apple/link`
 
-Explicitly links the Apple identity to the currently authenticated user.
+Explicitly links the Apple identity to the currently authenticated user. The
+request uses the same `identityToken`, `authorizationCode`, and `nonce` body as
+`POST /auth/apple`, plus a Bearer access token.
 
 This endpoint is allowed only with a backend-signed access token whose
 `auth_method` claim is `password`. A client-supplied method, flag, email, or
-user ID is never trusted for this decision. The future access-token claims are:
+user ID is never trusted for this decision. Access-token claims are:
 
 - `auth_method: password` for register/login by email and password;
 - `auth_method: apple` for Apple authentication.
@@ -44,7 +46,22 @@ the claim must not be accepted for linking and require a new email/password
 login.
 
 Successful linking returns `204` and keeps the current session. It does not
-create a second `AuthenticationSession`, access token, or refresh token.
+create a second `AuthenticationSession`, access token, refresh token, or
+`refresh_session`.
+
+The endpoint returns `403` for a valid Apple-originated or legacy access token,
+`409` when the Apple identity belongs to another user or the password user
+already has a different Apple identity, and `429` after five attempts in
+fifteen minutes per IP. Apple errors are sanitized to `401` or `503`.
+
+Linking never updates `users.email`. A verified Apple email, including a
+private relay address, is stored only as identity metadata. A matching email
+on another user never causes a merge.
+
+Linking the same Apple subject to the same user is idempotent. A valid new
+authorization replaces the encrypted provider refresh token, updates present
+email metadata and `last_provider_validation_at`, and clears `revoked_at`.
+Missing email metadata preserves the previously stored email and privacy flag.
 
 ## Nonce
 

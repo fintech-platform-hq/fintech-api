@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   ServiceUnavailableException,
   UnauthorizedException,
@@ -134,6 +135,28 @@ export class AuthService {
         dto.nonce,
       );
       return await this.createAppleSession(authorization);
+    } catch (error) {
+      if (error instanceof AppleAuthError) this.throwPublicAppleError(error);
+      throw error;
+    }
+  }
+
+  async linkApple(
+    principal: AuthPrincipal,
+    dto: AppleAuthenticationDto,
+  ): Promise<void> {
+    if (principal.authMethod !== 'password') {
+      throw new ForbiddenException('Password authentication required');
+    }
+
+    try {
+      this.appleRefreshTokens.assertConfigured();
+      const authorization = await this.appleTokens.exchangeAuthorizationCode(
+        dto.identityToken,
+        dto.authorizationCode,
+        dto.nonce,
+      );
+      await this.linkAppleIdentity(principal.userId, authorization);
     } catch (error) {
       if (error instanceof AppleAuthError) this.throwPublicAppleError(error);
       throw error;
@@ -406,6 +429,94 @@ export class AuthService {
     }
   }
 
+  private async linkAppleIdentity(
+    userId: string,
+    authorization: AppleAuthorizationExchange,
+  ): Promise<void> {
+    const client = await this.db.getClient();
+    let transactionOpen = false;
+
+    try {
+      await client.query('BEGIN');
+      transactionOpen = true;
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`apple:${authorization.subject}`],
+      );
+
+      const existing = await client.query<AuthIdentityRow>(
+        `
+          SELECT id, user_id
+          FROM auth_identities
+          WHERE provider = 'apple' AND provider_subject = $1
+        `,
+        [authorization.subject],
+      );
+      const identity = existing.rows[0];
+
+      if (identity && identity.user_id !== userId) {
+        throw appleIdentityLinkConflict();
+      }
+
+      const identityId = identity?.id ?? randomUUID();
+      const ciphertext = this.appleRefreshTokens.encrypt(
+        authorization.refreshToken,
+        identityId,
+      );
+
+      if (identity) {
+        await client.query(
+          `
+            UPDATE auth_identities
+            SET provider_email = COALESCE($1, provider_email),
+                is_private_email = CASE
+                  WHEN $1 IS NULL THEN is_private_email
+                  ELSE $2
+                END,
+                provider_refresh_token_ciphertext = $3,
+                last_provider_validation_at = now(),
+                revoked_at = NULL
+            WHERE id = $4 AND user_id = $5
+          `,
+          [
+            authorization.email ?? null,
+            authorization.isPrivateEmail,
+            ciphertext,
+            identityId,
+            userId,
+          ],
+        );
+      } else {
+        await client.query(
+          `
+            INSERT INTO auth_identities (
+              id, user_id, provider, provider_subject, provider_email,
+              is_private_email, provider_refresh_token_ciphertext,
+              last_provider_validation_at
+            ) VALUES ($1, $2, 'apple', $3, $4, $5, $6, now())
+          `,
+          [
+            identityId,
+            userId,
+            authorization.subject,
+            authorization.email ?? null,
+            authorization.isPrivateEmail,
+            ciphertext,
+          ],
+        );
+      }
+
+      await client.query('COMMIT');
+      transactionOpen = false;
+    } catch (error) {
+      if (transactionOpen) await client.query('ROLLBACK');
+      if (isAppleIdentityConflict(error)) throw appleIdentityLinkConflict();
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   private authResponse(
     userId: string,
     refreshToken: string,
@@ -532,5 +643,19 @@ function isUsersEmailConflict(error: unknown): boolean {
   return (
     databaseError.code === '23505' &&
     databaseError.constraint === 'users_email_key'
+  );
+}
+
+function appleIdentityLinkConflict(): ConflictException {
+  return new ConflictException('Apple identity cannot be linked');
+}
+
+function isAppleIdentityConflict(error: unknown): boolean {
+  const databaseError = error as { code?: unknown; constraint?: unknown };
+  return (
+    databaseError.code === '23505' &&
+    (databaseError.constraint ===
+      'auth_identities_provider_provider_subject_key' ||
+      databaseError.constraint === 'auth_identities_user_id_provider_key')
   );
 }

@@ -46,6 +46,7 @@ The current API milestone provides:
 - Transaction creation with PostgreSQL persistence
 - Email/password authentication with 15-minute HS256 access tokens
 - Sign in with Apple through `POST /auth/apple`, issuing the same Fintech session contract
+- Explicit Apple identity linking through `POST /auth/apple/link` for password-origin sessions
 - Opaque 30-day refresh tokens with rotation and reuse-family revocation
 - User-owned accounts and optional categories enforced by PostgreSQL constraints
 - Idempotent writes using the `Idempotency-Key` header
@@ -336,8 +337,9 @@ APPLE_REFRESH_TOKEN_ENCRYPTION_KEY=<unpadded-base64url-32-byte-key>
 PORT=3000
 ```
 
-Apple configuration is loaded only when `/auth/apple` is used. Do not commit
-real credentials, encryption keys, or production connection strings.
+Apple configuration is loaded only when `/auth/apple` or `/auth/apple/link` is
+used. Do not commit real credentials, encryption keys, or production connection
+strings.
 
 ### Start with Docker
 

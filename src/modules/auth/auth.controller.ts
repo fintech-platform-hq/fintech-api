@@ -1,6 +1,16 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { AuthResponse } from './auth.types';
+import { AuthGuard } from './auth.guard';
+import type { AuthenticatedRequest } from './auth.guard';
 import { CredentialsDto } from './dto/credentials.dto';
 import { AppleAuthenticationDto } from './dto/apple-authentication.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
@@ -24,6 +34,16 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   apple(@Body() dto: AppleAuthenticationDto): Promise<AuthResponse> {
     return this.authService.apple(dto);
+  }
+
+  @Post('apple/link')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  linkApple(
+    @Body() dto: AppleAuthenticationDto,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    return this.authService.linkApple(request.principal, dto);
   }
 
   @Post('refresh')
