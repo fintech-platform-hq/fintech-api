@@ -1,7 +1,9 @@
 import {
   ConflictException,
   ForbiddenException,
+  HttpException,
   Injectable,
+  InternalServerErrorException,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -14,6 +16,7 @@ import {
   timingSafeEqual,
 } from 'crypto';
 import { promisify } from 'util';
+import type { PoolClient } from 'pg';
 import { isUUID } from 'class-validator';
 import { DatabaseService } from '../../common/database/database.service';
 import { AuthConfig } from './auth.config';
@@ -42,6 +45,13 @@ interface RefreshSessionRow {
   revoked_at: Date | null;
 }
 
+interface AppleIdentityRefreshRow {
+  id: string;
+  provider_subject: string;
+  provider_refresh_token_ciphertext: string | null;
+  revoked_at: Date | null;
+}
+
 interface JwtPayload {
   sub: unknown;
   iss: unknown;
@@ -59,6 +69,8 @@ interface AuthIdentityRow {
 
 @Injectable()
 export class AuthService {
+  // ponytail: backoff is process-local; shared attempt state is needed before scale-out.
+  private readonly appleValidationBackoff = new Map<string, number>();
   constructor(
     private readonly db: DatabaseService,
     private readonly config: AuthConfig,
@@ -167,6 +179,8 @@ export class AuthService {
     const tokenHash = this.hashToken(refreshToken);
     const client = await this.db.getClient();
     let transactionOpen = false;
+    let appleRefresh = false;
+    let discardClient = false;
 
     try {
       await client.query('BEGIN');
@@ -183,6 +197,22 @@ export class AuthService {
 
       if (!initialSession) {
         throw new UnauthorizedException('Invalid refresh token');
+      }
+
+      let appleIdentity: AppleIdentityRefreshRow | undefined;
+      if (initialSession.auth_identity_id) {
+        appleRefresh = true;
+        const identity = await client.query<AppleIdentityRefreshRow>(
+          `SELECT id, provider_subject, provider_refresh_token_ciphertext,
+                  revoked_at
+           FROM auth_identities
+           WHERE id = $1 AND user_id = $2 AND provider = 'apple'
+           FOR NO KEY UPDATE`,
+          [initialSession.auth_identity_id, initialSession.user_id],
+        );
+        appleIdentity = identity.rows[0];
+        if (!appleIdentity)
+          throw new UnauthorizedException('Invalid refresh token');
       }
 
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
@@ -224,6 +254,30 @@ export class AuthService {
         throw new UnauthorizedException('Invalid refresh token');
       }
 
+      if (appleIdentity) {
+        if (appleIdentity.revoked_at) {
+          await this.revokeAppleSessions(client, appleIdentity.id);
+          await client.query('COMMIT');
+          transactionOpen = false;
+          throw new UnauthorizedException('Invalid refresh token');
+        }
+        const validation = await client.query<{ validation_due: boolean }>(
+          `SELECT COALESCE(
+             last_provider_validation_at <= clock_timestamp() - interval '24 hours',
+             true
+           ) AS validation_due FROM auth_identities WHERE id = $1`,
+          [appleIdentity.id],
+        );
+        if (
+          validation.rows[0].validation_due &&
+          !(await this.revalidateAppleIdentity(client, appleIdentity))
+        ) {
+          await client.query('COMMIT');
+          transactionOpen = false;
+          throw new UnauthorizedException('Invalid refresh token');
+        }
+      }
+
       await client.query(
         `UPDATE refresh_sessions SET revoked_at = now() WHERE token_hash = $1`,
         [tokenHash],
@@ -246,12 +300,95 @@ export class AuthService {
       );
     } catch (error) {
       if (transactionOpen) {
-        await client.query('ROLLBACK');
+        try {
+          await client.query('ROLLBACK');
+        } catch (rollbackError) {
+          discardClient = true;
+          if (!appleRefresh) throw rollbackError;
+        }
+      }
+      if (appleRefresh && !(error instanceof HttpException)) {
+        throw new InternalServerErrorException();
       }
       throw error;
     } finally {
-      client.release();
+      client.release(discardClient || undefined);
     }
+  }
+
+  private async revalidateAppleIdentity(
+    client: PoolClient,
+    identity: AppleIdentityRefreshRow,
+  ): Promise<boolean> {
+    const ciphertext = identity.provider_refresh_token_ciphertext;
+    if (!ciphertext)
+      throw new ServiceUnavailableException(
+        'Apple authentication is temporarily unavailable',
+      );
+    const backoffKey = `${identity.id}:${createHash('sha256').update(ciphertext).digest('hex')}`;
+    this.pruneAppleValidationBackoff();
+    const blockedUntil = this.appleValidationBackoff.get(backoffKey) ?? 0;
+    if (blockedUntil > Date.now()) {
+      throw new ServiceUnavailableException(
+        'Apple authentication is temporarily unavailable',
+      );
+    }
+    try {
+      const token = this.appleRefreshTokens.decrypt(ciphertext, identity.id);
+      await this.appleTokens.validateRefreshToken(
+        token,
+        identity.provider_subject,
+      );
+    } catch (error) {
+      if (
+        error instanceof AppleAuthError &&
+        error.code === 'APPLE_REFRESH_TOKEN_REJECTED'
+      ) {
+        await client.query(
+          `UPDATE auth_identities SET revoked_at = COALESCE(revoked_at, now()) WHERE id = $1`,
+          [identity.id],
+        );
+        await this.revokeAppleSessions(client, identity.id);
+        return false;
+      }
+      this.pruneAppleValidationBackoff();
+      this.appleValidationBackoff.delete(backoffKey);
+      if (this.appleValidationBackoff.size >= 10_000) {
+        for (const oldestKey of this.appleValidationBackoff.keys()) {
+          this.appleValidationBackoff.delete(oldestKey);
+          break;
+        }
+      }
+      this.appleValidationBackoff.set(backoffKey, Date.now() + 60_000);
+      throw new ServiceUnavailableException(
+        'Apple authentication is temporarily unavailable',
+      );
+    }
+    await client.query(
+      `UPDATE auth_identities SET last_provider_validation_at = clock_timestamp()
+       WHERE id = $1`,
+      [identity.id],
+    );
+    this.appleValidationBackoff.delete(backoffKey);
+    return true;
+  }
+
+  private pruneAppleValidationBackoff(): void {
+    const now = Date.now();
+    for (const [key, expiresAt] of this.appleValidationBackoff) {
+      if (expiresAt <= now) this.appleValidationBackoff.delete(key);
+    }
+  }
+
+  private async revokeAppleSessions(
+    client: PoolClient,
+    identityId: string,
+  ): Promise<void> {
+    await client.query(
+      `UPDATE refresh_sessions SET revoked_at = COALESCE(revoked_at, now())
+       WHERE auth_identity_id = $1`,
+      [identityId],
+    );
   }
 
   async logout(refreshToken: string): Promise<void> {
@@ -620,7 +757,8 @@ export class AuthService {
       error.code === 'INVALID_IDENTITY_TOKEN' ||
       error.code === 'UNKNOWN_APPLE_KID' ||
       error.code === 'APPLE_AUTHORIZATION_CODE_REJECTED' ||
-      error.code === 'APPLE_TOKEN_REQUEST_REJECTED'
+      error.code === 'APPLE_TOKEN_REQUEST_REJECTED' ||
+      error.code === 'APPLE_REFRESH_TOKEN_REJECTED'
     ) {
       throw new UnauthorizedException('Invalid Apple authentication');
     }

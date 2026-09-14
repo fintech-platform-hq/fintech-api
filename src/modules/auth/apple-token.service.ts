@@ -63,6 +63,25 @@ export class AppleTokenService {
       isPrivateEmail: identityWithEmail.isPrivateEmail ?? false,
     };
   }
+
+  async validateRefreshToken(
+    refreshToken: string,
+    expectedSubject: string,
+  ): Promise<void> {
+    const response = await this.api.validateRefreshToken(
+      refreshToken,
+      this.config.appleClientId,
+      this.clientSecrets.generate(),
+    );
+    const identity = await this.identityTokens.verifyRefreshToken(
+      response.idToken,
+    );
+    if (identity.subject !== expectedSubject)
+      throw new AppleAuthError(
+        'INVALID_IDENTITY_TOKEN',
+        'Invalid Apple identity token',
+      );
+  }
 }
 
 function rejectedAuthorizationCode(): AppleAuthError {

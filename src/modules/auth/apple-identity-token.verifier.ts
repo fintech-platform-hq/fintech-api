@@ -35,13 +35,19 @@ export class AppleIdentityTokenVerifier {
     return this.verifyToken(identityToken, expectedNonce, false);
   }
 
+  async verifyRefreshToken(
+    identityToken: string,
+  ): Promise<VerifiedAppleIdentity> {
+    return this.verifyToken(identityToken, '', false);
+  }
+
   private async verifyToken(
     identityToken: string,
     expectedNonce: string,
     requireNonce: boolean,
   ): Promise<VerifiedAppleIdentity> {
     try {
-      if (!expectedNonce) throw invalidIdentityToken();
+      if (requireNonce && !expectedNonce) throw invalidIdentityToken();
       const segments = identityToken.split('.');
       if (segments.length !== 3) throw invalidIdentityToken();
 
@@ -121,6 +127,7 @@ function validNonce(
   expected: string,
   required: boolean,
 ): boolean {
+  if (!required && expected === '') return true;
   if (actual === undefined) return !required;
   return typeof actual === 'string' && noncesMatch(actual, expected);
 }

@@ -152,9 +152,38 @@ envelope is `v1.<iv>.<ciphertext>.<tag>` using unpadded Base64URL fields, a
 random 96-bit IV, and AAD bound to the `auth_identities.id`. Fintech refresh
 tokens remain opaque to clients and hash-only in the database.
 
-## Deferred provider validation
+## On-demand provider validation
 
-The future periodic check uses Apple's token endpoint with
-`grant_type=refresh_token`. A 24-hour validation window is an application MVP
-policy, not an instantaneous revocation guarantee. Apple server-to-server
-notifications remain outside this checkpoint.
+`POST /auth/refresh` checks Apple only when the last successful validation is
+at least 24 hours old (or absent), using the encrypted provider refresh token and Apple's token endpoint
+with `grant_type=refresh_token`. Password sessions never contact Apple. A
+successful validation updates `last_provider_validation_at`; a temporary Apple
+failure returns `503` without rotating the Fintech refresh token or changing
+identity state. An `invalid_grant` response marks the identity revoked and
+revokes only its linked Apple refresh sessions. A Fintech access JWT already
+issued can remain valid until its current 15-minute TTL. Apple
+server-to-server notifications remain outside this checkpoint.
+
+PostgreSQL is the clock for the validation window. Only success updates
+`last_provider_validation_at`, using `clock_timestamp()` after provider validation;
+the update and Fintech rotation commit together. An unsuccessful database
+transaction rolls back the timestamp as well. A previously issued access JWT is
+not blacklisted when the identity is revoked. Interactive Apple sign-in or linking
+can reactivate the identity, but never restores revoked Fintech refresh sessions.
+
+Temporary failures have a 60-second process-local backoff keyed by identity ID
+and the SHA-256 fingerprint of the ciphertext. It stores only keys and deadlines;
+expired entries are removed on access/insertion. The map holds at most 10,000
+entries and evicts the oldest inserted entry when full. Requests during backoff
+return `503` without calling Apple, consuming the refresh token, or revoking data.
+After 60 seconds a new request may retry; there is no automatic retry. Restart
+loses this backoff, and multiple instances do not share it. Thus the 24-hour
+window concerns successfully persisted validations, not every attempt (including
+attempts whose database transaction failed). PostgreSQL row locking prevents
+simultaneous revalidation of the same identity across instances.
+
+Apple refreshes lock the identity with `FOR NO KEY UPDATE`, then acquire the
+existing refresh-family advisory lock, then lock the refresh session. Password
+refreshes retain the existing family/session flow. Provider rejection commits
+identity/session revocation before returning `401`; a database failure returns
+a sanitized internal error and performs transaction cleanup instead.

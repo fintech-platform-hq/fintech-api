@@ -12,6 +12,12 @@ export interface AppleTokenResponse {
   refreshToken: string;
 }
 
+export interface AppleRefreshTokenResponse {
+  accessToken: string;
+  expiresIn: number;
+  idToken: string;
+}
+
 @Injectable()
 export class AppleApiClient {
   async fetchJwks(): Promise<unknown> {
@@ -84,6 +90,70 @@ export class AppleApiClient {
     if (response.status === 400) throw tokenRequestError(payload);
     return parseTokenResponse(payload);
   }
+
+  async validateRefreshToken(
+    refreshToken: string,
+    clientId: string,
+    clientSecret: string,
+  ): Promise<AppleRefreshTokenResponse> {
+    const body = new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    });
+    let response: Response;
+    try {
+      response = await fetch(APPLE_TOKEN_URL, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body,
+        redirect: 'error',
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch {
+      throw tokenApiUnavailable();
+    }
+    if (
+      response.status >= 500 ||
+      (response.status !== 200 && response.status !== 400)
+    ) {
+      throw tokenApiUnavailable();
+    }
+    if (
+      !response.headers
+        .get('content-type')
+        ?.toLowerCase()
+        .startsWith('application/json')
+    ) {
+      throw invalidTokenResponse();
+    }
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw invalidTokenResponse();
+    }
+    if (response.status === 400) throw refreshTokenRequestError(payload);
+    if (
+      !isRecord(payload) ||
+      !isNonEmptyString(payload.access_token) ||
+      typeof payload.token_type !== 'string' ||
+      payload.token_type.toLowerCase() !== 'bearer' ||
+      !Number.isInteger(payload.expires_in) ||
+      Number(payload.expires_in) <= 0 ||
+      !isNonEmptyString(payload.id_token)
+    )
+      throw invalidTokenResponse();
+    return {
+      accessToken: payload.access_token,
+      expiresIn: Number(payload.expires_in),
+      idToken: payload.id_token,
+    };
+  }
 }
 
 function parseTokenResponse(value: unknown): AppleTokenResponse {
@@ -117,6 +187,37 @@ function tokenRequestError(value: unknown): AppleAuthError {
     return new AppleAuthError(
       'APPLE_AUTHORIZATION_CODE_REJECTED',
       'Apple authorization code was rejected',
+    );
+  }
+  if (
+    value.error === 'invalid_client' ||
+    value.error === 'unauthorized_client'
+  ) {
+    return new AppleAuthError(
+      'INVALID_APPLE_CONFIGURATION',
+      'Apple client configuration was rejected',
+    );
+  }
+  if (
+    value.error === 'invalid_request' ||
+    value.error === 'unsupported_grant_type' ||
+    value.error === 'invalid_scope'
+  ) {
+    return new AppleAuthError(
+      'APPLE_TOKEN_REQUEST_REJECTED',
+      'Apple token request was rejected',
+    );
+  }
+  return invalidTokenResponse();
+}
+
+function refreshTokenRequestError(value: unknown): AppleAuthError {
+  if (!isRecord(value) || typeof value.error !== 'string')
+    return invalidTokenResponse();
+  if (value.error === 'invalid_grant') {
+    return new AppleAuthError(
+      'APPLE_REFRESH_TOKEN_REJECTED',
+      'Apple refresh token was rejected',
     );
   }
   if (

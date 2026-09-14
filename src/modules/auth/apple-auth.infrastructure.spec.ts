@@ -870,7 +870,10 @@ describe('Apple authentication infrastructure', () => {
 });
 
 function jwksService(fetchJwks: jest.Mock): AppleJwksService {
-  return new AppleJwksService({ fetchJwks });
+  return new AppleJwksService({
+    fetchJwks,
+    validateRefreshToken: jest.fn(),
+  } as unknown as AppleApiClient);
 }
 
 function rsaJwk(kid: string): Record<string, unknown> {

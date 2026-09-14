@@ -337,9 +337,12 @@ APPLE_REFRESH_TOKEN_ENCRYPTION_KEY=<unpadded-base64url-32-byte-key>
 PORT=3000
 ```
 
-Apple configuration is loaded only when `/auth/apple` or `/auth/apple/link` is
-used. Do not commit real credentials, encryption keys, or production connection
-strings.
+Apple configuration is loaded when Apple sign-in, linking, or an Apple refresh
+whose provider validation is at least 24 hours old requires it. Temporary failures
+return `503` without consuming the Fintech refresh token, with a 60-second
+process-local backoff; see the [Apple contract](docs/specs/apple-authentication.md).
+Do not commit real credentials,
+encryption keys, or production connection strings.
 
 ### Start with Docker
 
