@@ -7,6 +7,7 @@
   "license": "UNLICENSED",
   "scripts": {
     "build": "npx nest build",
+    "preflight:config": "node dist/config-preflight",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",

@@ -1,0 +1,12 @@
+# Preventive hardening for the versioned Dockerfile. Staging uses Native Node 20,
+# so this file is not required by the staging runtime.
+.git
+.env*
+.npmrc
+*.p8
+node_modules
+dist
+build
+coverage
+logs
+*.log
