@@ -67,6 +67,7 @@ export const summarySql = (cut = 'statement_timestamp()') => `
 type HistoryEntry = Omit<MvpTransactionReceipt, 'revision'> & {
   occurrenceDay: string | null;
   occurrenceZone: string | null;
+  auditAction: 'correct' | 'invalidate' | null;
   coverage: 'covered' | 'before_base' | 'after_cut' | 'no_base';
 };
 
@@ -93,7 +94,7 @@ const historySql = `
     SELECT jsonb_agg(to_jsonb(page) ORDER BY page."occurredAt" DESC, page.id DESC) AS items
     FROM (
       SELECT t.id, t.account_id AS "accountId", t.type, t.amount_minor::text AS "amountMinor",
-        t.currency, t.description, t.occurrence_day::text AS "occurrenceDay",
+        t.currency, t.description, t.audit_action AS "auditAction", t.occurrence_day::text AS "occurrenceDay",
         t.occurrence_zone AS "occurrenceZone",
         to_char(t.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt",
         to_char(t.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt",
@@ -103,7 +104,7 @@ const historySql = `
           WHEN COALESCE(t.latest_occurrence_at, t.occurred_at) > s."asOf"::timestamptz THEN 'after_cut'
           ELSE 'covered'
         END AS coverage
-      FROM transactions t
+      FROM mvp_effective_movements t
       WHERE s.account IS NOT NULL AND t.user_id = $1 AND t.account_id = $2
         AND ($4::timestamptz IS NULL OR (t.occurred_at, t.id) < ($4, $5::uuid))
       ORDER BY t.occurred_at DESC, t.id DESC LIMIT 51

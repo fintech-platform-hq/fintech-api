@@ -25,6 +25,9 @@ import { MvpOpeningDto } from './mvp-opening.dto';
 import { MvpRecoveryInput, MvpRecoveryConfirmation } from './mvp-recovery.dto';
 import { MvpRecoveryService } from './mvp-recovery.service';
 
+import { MvpAuditInput, MvpAuditConfirmation } from './mvp-audit.dto';
+import { MvpAuditService } from './mvp-audit.service';
+
 @Controller('mvp')
 @UseGuards(AuthGuard)
 export class MvpAccountController {
@@ -32,7 +35,38 @@ export class MvpAccountController {
     private readonly accounts: MvpAccountService,
     private readonly checks: MvpCheckService,
     private readonly recoveries: MvpRecoveryService,
+    private readonly audit: MvpAuditService,
   ) {}
+
+  @Post('audit-previews')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  previewAudit(
+    @Req() request: AuthenticatedRequest,
+    @Body() dto: MvpAuditInput,
+  ) {
+    return this.audit.preview(request.principal.userId, dto);
+  }
+
+  @Post('audited-changes')
+  @Header('Cache-Control', 'no-store')
+  confirmAudit(
+    @Req() request: AuthenticatedRequest,
+    @Headers('idempotency-key') key: string,
+    @Body() dto: MvpAuditConfirmation,
+  ) {
+    return this.audit.confirm(request.principal.userId, key, dto);
+  }
+
+  @Get('account/:accountId/history/:movementId/versions')
+  @Header('Cache-Control', 'no-store')
+  movementVersions(
+    @Req() request: AuthenticatedRequest,
+    @Param('accountId', ParseUUIDPipe) accountId: string,
+    @Param('movementId', ParseUUIDPipe) movementId: string,
+  ) {
+    return this.audit.versions(request.principal.userId, accountId, movementId);
+  }
 
   @Post('recovery-previews')
   @HttpCode(200)
