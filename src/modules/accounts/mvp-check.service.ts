@@ -30,6 +30,7 @@ export interface MvpCheckEntry extends MvpCheckReceipt {
   calculatedAtReferenceMinor: string;
   remainingDifferenceMinor: string;
   status: 'open' | 'coincident';
+  resolutionStatus: 'open' | 'coincident' | 'partially_explained' | 'resolved';
 }
 
 const receiptFields = `
@@ -55,7 +56,9 @@ const checksSql = `
     FROM (
       SELECT ${receiptFields}, cut.balance::text AS "calculatedAtReferenceMinor",
         (cut.balance - c.observed_minor)::text AS "remainingDifferenceMinor",
-        CASE WHEN cut.balance = c.observed_minor THEN 'coincident' ELSE 'open' END AS status
+        CASE WHEN cut.balance = c.observed_minor THEN 'coincident' ELSE 'open' END AS status,
+        mvp_recovery_status(c.original_difference_minor, cut.balance - c.observed_minor,
+          mvp_recovery_delta(c.id, c.mvp_revision)) AS "resolutionStatus"
       FROM mvp_balance_checks c
       CROSS JOIN LATERAL (
         SELECT mvp_balance_at(c.user_id, c.account_id, (s.base->>'baseMinor')::bigint,
@@ -83,11 +86,13 @@ export class MvpCheckService {
     } = await this.db.query<{
       revision: string | null;
       covered: boolean;
+      ambiguous: boolean;
       calculatedMinor: string;
       differenceMinor: string;
     }>(
       `SELECT m.revision::text,
         $3::timestamptz BETWEEN m.coverage_start AND statement_timestamp() AS covered,
+        mvp_cut_needs_occurrence_time(a.user_id, a.id, $3) AS ambiguous,
         cut.balance::text AS "calculatedMinor",
         (cut.balance - $4::bigint)::text AS "differenceMinor"
        FROM accounts a
@@ -104,6 +109,7 @@ export class MvpCheckService {
         'Reference time is outside account coverage',
       );
     }
+    if (check.ambiguous) this.ambiguousCut();
     return {
       ...input,
       revision,
@@ -246,6 +252,7 @@ export class MvpCheckService {
           'Check confirmation is temporarily unavailable; retry the same request',
         );
       }
+      if (constraint === 'mvp_cut_requires_time') this.ambiguousCut();
       if (constraint === 'mvp_check_coverage') {
         throw new BadRequestException(
           'Reference time is outside account coverage',
@@ -283,6 +290,15 @@ export class MvpCheckService {
       });
     }
     return revision;
+  }
+
+  private ambiguousCut(): never {
+    throw new ConflictException({
+      statusCode: 409,
+      code: 'OCCURRENCE_TIME_REQUIRED',
+      message:
+        'Choose another cut; a date-only movement is ambiguous at this time',
+    });
   }
 
   private stale(): never {

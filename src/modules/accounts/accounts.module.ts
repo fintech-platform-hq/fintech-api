@@ -6,10 +6,16 @@ import { AccountsService } from './accounts.service';
 import { MvpAccountController } from './mvp-account.controller';
 import { MvpAccountService } from './mvp-account.service';
 import { MvpCheckService } from './mvp-check.service';
+import { MvpRecoveryService } from './mvp-recovery.service';
 
 @Module({
   imports: [DatabaseModule, AuthModule],
   controllers: [AccountsController, MvpAccountController],
-  providers: [AccountsService, MvpAccountService, MvpCheckService],
+  providers: [
+    AccountsService,
+    MvpAccountService,
+    MvpCheckService,
+    MvpRecoveryService,
+  ],
 })
 export class AccountsModule {}

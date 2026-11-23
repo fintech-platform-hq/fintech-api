@@ -64,6 +64,31 @@ describe('Accounts API (e2e)', () => {
     await request(app.getHttpServer()).get('/accounts').expect(401);
   });
 
+  it('guards recovery previews and rejects an unconfirmed or malformed recovery', async () => {
+    const input = {
+      accountId: account.id,
+      checkId: account.id,
+      amountMinor: '2500',
+      day: '2026-11-15',
+    };
+    await request(app.getHttpServer())
+      .post('/mvp/recovery-previews')
+      .send(input)
+      .expect(401);
+    await request(app.getHttpServer())
+      .post('/mvp/recovery-previews')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ ...input, day: '2026-02-29' })
+      .expect(400);
+    await request(app.getHttpServer())
+      .post('/mvp/recoveries')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .set('Idempotency-Key', account.id)
+      .send({ ...input, expectedRevision: '4', action: 'create' })
+      .expect(400);
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('returns an empty list for an authenticated user without accounts', async () => {
     await request(app.getHttpServer())
       .get('/accounts')

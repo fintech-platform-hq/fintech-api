@@ -94,6 +94,9 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
     await pool.query(
       readFileSync('migrations/20261123_record_mvp_balance_checks.sql', 'utf8'),
     );
+    await pool.query(
+      readFileSync('migrations/20261123_recover_mvp_expenses.sql', 'utf8'),
+    );
   });
 
   afterAll(async () => {
@@ -205,6 +208,19 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
 
   it('preserves pre-upgrade accounts, movements and receipts, and blocks legacy adoption', async () => {
     expect(await readLegacyRows()).toEqual(legacyRows);
+    const { rows: precision } = await pool.query(
+      `SELECT occurrence_day, occurrence_zone, latest_occurrence_at, mvp_recovery_id
+       FROM transactions WHERE account_id = $1`,
+      [legacyId],
+    );
+    expect(precision).toEqual([
+      {
+        occurrence_day: null,
+        occurrence_zone: null,
+        latest_occurrence_at: null,
+        mvp_recovery_id: null,
+      },
+    ]);
     await postMove(legacyAuth, legacyKey, legacyMove)
       .expect(201)
       .expect(({ body }) => expect(body).toEqual(legacyReceipt));
@@ -657,7 +673,8 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
   async function readLegacyRows() {
     const { rows } = await pool.query<Record<string, unknown>>(
       `
-      SELECT to_jsonb(a) AS account, to_jsonb(t) - 'mvp_write_key' - 'mvp_revision' AS movement, to_jsonb(i) AS receipt
+      SELECT to_jsonb(a) AS account, to_jsonb(t) - ARRAY['mvp_write_key', 'mvp_revision', 'occurrence_day', 'occurrence_zone',
+        'latest_occurrence_at', 'mvp_recovery_id'] AS movement, to_jsonb(i) AS receipt
       FROM accounts a
       JOIN transactions t ON t.user_id = a.user_id AND t.account_id = a.id
       JOIN idempotency_keys i ON i.user_id = a.user_id AND i.idempotency_key = $2
