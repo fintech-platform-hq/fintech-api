@@ -27,10 +27,11 @@ export interface MvpCheckReceipt extends MvpCheckInput {
 }
 
 export interface MvpCheckEntry extends MvpCheckReceipt {
-  calculatedAtReferenceMinor: string;
-  remainingDifferenceMinor: string;
-  status: 'open' | 'coincident';
-  resolutionStatus: 'open' | 'coincident' | 'partially_explained' | 'resolved';
+  calculatedAtReferenceMinor: string | null;
+  remainingDifferenceMinor: string | null;
+  status: 'open' | 'coincident' | 'unavailable';
+  resolutionStatus:
+    'open' | 'coincident' | 'partially_explained' | 'resolved' | 'unavailable';
   supersededBy: string | null;
   replacesCheckId: string | null;
   replacementReason: string | null;
@@ -59,17 +60,20 @@ const checksSql = `
     FROM (
       SELECT ${receiptFields}, cut.balance::text AS "calculatedAtReferenceMinor",
         (cut.balance - c.observed_minor)::text AS "remainingDifferenceMinor",
-        CASE WHEN cut.balance = c.observed_minor THEN 'coincident' ELSE 'open' END AS status,
-        mvp_recovery_status(c.original_difference_minor, cut.balance - c.observed_minor,
-          mvp_recovery_delta(c.id, c.mvp_revision)) AS "resolutionStatus",
+        CASE WHEN cut.balance IS NULL THEN 'unavailable'
+          WHEN cut.balance = c.observed_minor THEN 'coincident' ELSE 'open' END AS status,
+        CASE WHEN cut.balance IS NULL THEN 'unavailable' ELSE
+          mvp_recovery_status(c.original_difference_minor, cut.balance - c.observed_minor,
+            mvp_recovery_delta(c.id, c.mvp_revision)) END AS "resolutionStatus",
         (SELECT x.replacement_id FROM mvp_check_replacements x WHERE x.original_id = c.id) AS "supersededBy",
         (SELECT x.original_id FROM mvp_check_replacements x WHERE x.replacement_id = c.id) AS "replacesCheckId",
         (SELECT x.reason FROM mvp_check_replacements x WHERE x.replacement_id = c.id OR x.original_id = c.id
           ORDER BY (x.original_id = c.id) DESC LIMIT 1) AS "replacementReason"
       FROM mvp_balance_checks c
       CROSS JOIN LATERAL (
-        SELECT mvp_balance_at(c.user_id, c.account_id, (s.base->>'baseMinor')::bigint,
-          (s.base->>'coverageStart')::timestamptz, c.reference_at) AS balance
+        SELECT CASE WHEN s.status = 'available' THEN
+          mvp_balance_at(c.user_id, c.account_id, (s.base->>'baseMinor')::bigint,
+            (s.base->>'coverageStart')::timestamptz, c.reference_at) END AS balance
       ) cut
       WHERE c.user_id = $1 AND c.account_id = $2 AND s.revision IS NOT NULL
         AND ($4::text IS NULL OR s.revision = $4)
@@ -95,10 +99,11 @@ export class MvpCheckService {
       revision: string | null;
       covered: boolean;
       ambiguous: boolean;
+      suspended: boolean;
       calculatedMinor: string;
       differenceMinor: string;
     }>(
-      `SELECT m.revision::text,
+      `SELECT m.revision::text, m.base_suspended AS suspended,
         $3::timestamptz BETWEEN m.coverage_start AND statement_timestamp() AS covered,
         mvp_cut_needs_occurrence_time(a.user_id, a.id, $3) AS ambiguous,
         cut.balance::text AS "calculatedMinor",
@@ -112,6 +117,7 @@ export class MvpCheckService {
       [userId, input.accountId, input.referenceAt, input.observedMinor],
     );
     const revision = this.requireBase(check?.revision);
+    if (check.suspended) this.suspended();
     if (!check.covered) {
       throw new BadRequestException(
         'Reference time is outside account coverage',
@@ -260,6 +266,7 @@ export class MvpCheckService {
           'Check confirmation is temporarily unavailable; retry the same request',
         );
       }
+      if (constraint === 'mvp_base_suspended') this.suspended();
       if (constraint === 'mvp_cut_requires_time') this.ambiguousCut();
       if (constraint === 'mvp_check_coverage') {
         throw new BadRequestException(
@@ -298,6 +305,14 @@ export class MvpCheckService {
       });
     }
     return revision;
+  }
+
+  private suspended(): never {
+    throw new ConflictException({
+      statusCode: 409,
+      code: 'BASE_SUSPENDED',
+      message: 'The opening balance is under review',
+    });
   }
 
   private ambiguousCut(): never {

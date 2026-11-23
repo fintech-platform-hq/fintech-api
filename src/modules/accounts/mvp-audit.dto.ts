@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsIn,
   IsISO8601,
   IsOptional,
@@ -18,8 +19,21 @@ export class MvpAuditInput {
   @IsUUID()
   targetId: string;
 
-  @IsIn(['correct', 'invalidate', 'replace_check'])
-  action: 'correct' | 'invalidate' | 'replace_check';
+  @IsIn([
+    'correct',
+    'invalidate',
+    'replace_check',
+    'suspend_base',
+    'correct_base',
+    'refine_occurrence',
+  ])
+  action:
+    | 'correct'
+    | 'invalidate'
+    | 'replace_check'
+    | 'suspend_base'
+    | 'correct_base'
+    | 'refine_occurrence';
 
   @IsString()
   @Matches(/\S/u)
@@ -48,9 +62,21 @@ export class MvpAuditInput {
   @IsISO8601({ strict: true, strictSeparator: true })
   @Matches(utcInstant)
   referenceAt?: string;
+  @IsOptional()
+  @Matches(/^(0|-?[1-9]\d{0,18})$/)
+  baseMinor?: string;
+
+  @IsOptional()
+  @IsISO8601({ strict: true, strictSeparator: true })
+  @Matches(utcInstant)
+  coverageStart?: string;
 }
 
 export class MvpAuditConfirmation extends MvpAuditInput {
+  @IsOptional()
+  @IsBoolean()
+  confirmed?: boolean;
+
   @Matches(/^[1-9]\d{0,18}$/)
   expectedRevision: string;
 

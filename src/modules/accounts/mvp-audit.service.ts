@@ -17,12 +17,21 @@ import { AuthConfig } from '../auth/auth.config';
 import type { MvpAuditConfirmation, MvpAuditInput } from './mvp-audit.dto';
 import { receiptFields } from './mvp-check.service';
 
-const timestamp = (column: string) =>
-  `to_char(${column} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+import {
+  auditTimestamp as timestamp,
+  basePreviewSql,
+  baseVersionFields,
+} from './mvp-base-projection';
+
+const isBaseAction = (action: MvpAuditInput['action']) =>
+  action === 'correct_base' || action === 'suspend_base';
+
+const isI5Action = (action: MvpAuditInput['action']) =>
+  isBaseAction(action) || action === 'refine_occurrence';
 
 const movementPreviewSql = `
   WITH current AS (
-    SELECT t.*, a.revision, a.coverage_start, a.base_minor,
+    SELECT t.*, a.revision, a.coverage_start, a.base_minor, a.base_suspended,
       COALESCE($4::integer, t.amount_minor) AS next_amount,
       CASE WHEN $5::boolean THEN $6::text ELSE t.description END AS next_description,
       COALESCE($7::timestamptz, t.occurred_at) AS next_time,
@@ -31,14 +40,15 @@ const movementPreviewSql = `
     WHERE a.user_id = $1 AND a.account_id = $2 AND t.id = $3
   ), impacts AS (
     SELECT t.*,
-      mvp_balance_at(t.user_id, t.account_id, t.base_minor, t.coverage_start, statement_timestamp()) AS balance,
+      CASE WHEN NOT t.base_suspended THEN mvp_balance_at(t.user_id, t.account_id, t.base_minor, t.coverage_start, statement_timestamp()) END AS balance,
       mvp_movement_effect(t.type, t.next_amount, t.next_time, t.next_last, t.coverage_start, statement_timestamp(), $8::boolean)
       - mvp_movement_effect(t.type, t.amount_minor, t.occurred_at, t.latest_occurrence_at,
           t.coverage_start, statement_timestamp(), t.invalidated) AS delta
     FROM current t
   )
-  SELECT t.revision::text, t.invalidated AS blocked,
-    ($8 OR t.next_time BETWEEN t.coverage_start AND statement_timestamp()) AS covered,
+  SELECT t.revision::text, t.invalidated AS blocked, t.base_suspended AND NOT $9 AS suspended,
+    CASE WHEN $9 THEN t.latest_occurrence_at IS NOT NULL AND t.next_time BETWEEN t.occurred_at AND t.latest_occurrence_at
+      ELSE $8 OR $7 IS NULL OR t.next_time BETWEEN t.coverage_start AND statement_timestamp() END AS covered,
     ($8 OR ROW(t.next_amount, t.next_description, t.next_time, t.next_last)
       IS DISTINCT FROM ROW(t.amount_minor, t.description, t.occurred_at, t.latest_occurrence_at)) AS changed,
     t.balance::text AS "balanceMinor", (t.balance + t.delta)::text AS "projectedBalanceMinor",
@@ -48,8 +58,8 @@ const movementPreviewSql = `
         'afterMinor', (d.before + d.delta)::text) ORDER BY c.reference_at DESC, c.id)
       FROM mvp_balance_checks c
       CROSS JOIN LATERAL (
-        SELECT mvp_balance_at(t.user_id, t.account_id, t.base_minor, t.coverage_start, c.reference_at)
-          - c.observed_minor AS before,
+        SELECT CASE WHEN NOT t.base_suspended THEN mvp_balance_at(t.user_id, t.account_id, t.base_minor, t.coverage_start, c.reference_at)
+          - c.observed_minor END AS before,
           mvp_movement_effect(t.type, t.next_amount, t.next_time, t.next_last, t.coverage_start, c.reference_at, $8)
           - mvp_movement_effect(t.type, t.amount_minor, t.occurred_at, t.latest_occurrence_at,
               t.coverage_start, c.reference_at, t.invalidated) AS delta
@@ -60,7 +70,7 @@ const movementPreviewSql = `
 `;
 
 const replacementPreviewSql = `
-  SELECT a.revision::text,
+  SELECT a.revision::text, a.base_suspended AS suspended,
     EXISTS (SELECT 1 FROM mvp_check_replacements x WHERE x.original_id = c.id) AS blocked,
     $4::timestamptz BETWEEN a.coverage_start AND statement_timestamp() AS covered,
     ($4 <> c.reference_at OR $5::bigint <> c.observed_minor) AS changed,
@@ -85,14 +95,28 @@ interface AuditProjection {
   covered: boolean;
   changed: boolean;
   ambiguous?: boolean;
-  balanceMinor: string;
-  projectedBalanceMinor: string;
+  suspended?: boolean;
+  balanceMinor: string | null;
+  projectedBalanceMinor: string | null;
+  previousBaseMinor?: string;
+  previousCoverageStart?: string;
+  proposedBaseMinor?: string;
+  proposedCoverageStart?: string;
+  ambiguousMovementIds?: string[];
+  coverageChanges?: {
+    id: string;
+    description: string | null;
+    occurrenceDay: string | null;
+    occurredAt: string | null;
+    before: 'covered' | 'before_base';
+    after: 'covered' | 'before_base' | 'ambiguous';
+  }[];
   checks: {
     id: string;
     referenceAt: string;
     originalDifferenceMinor: string;
-    beforeMinor: string;
-    afterMinor: string;
+    beforeMinor: string | null;
+    afterMinor: string | null;
   }[];
 }
 
@@ -123,8 +147,9 @@ export class MvpAuditService {
 
   async preview(userId: string, dto: MvpAuditInput) {
     const input = this.normalize(dto);
+    const projection = await this.project(this.db, userId, input);
     const { revision, balanceMinor, projectedBalanceMinor, checks } =
-      await this.project(this.db, userId, input);
+      projection;
     return {
       accountId: input.accountId,
       targetId: input.targetId,
@@ -132,8 +157,29 @@ export class MvpAuditService {
       balanceMinor,
       projectedBalanceMinor,
       checks,
-      previewToken: this.token(userId, input, revision),
+      ...(isBaseAction(input.action) && {
+        previousBaseMinor: projection.previousBaseMinor,
+        previousCoverageStart: projection.previousCoverageStart,
+        proposedBaseMinor: projection.proposedBaseMinor,
+        proposedCoverageStart: projection.proposedCoverageStart,
+        ambiguousMovementIds: projection.ambiguousMovementIds,
+        coverageChanges: projection.coverageChanges,
+      }),
+      previewToken: projection.ambiguousMovementIds?.length
+        ? null
+        : this.token(userId, input, revision),
     };
+  }
+
+  async baseVersions(userId: string, accountId: string) {
+    const { rows } = await this.db.query(
+      `SELECT ${baseVersionFields} FROM mvp_base_versions
+       WHERE user_id = $1 AND account_id = $2 ORDER BY mvp_base_versions.revision DESC`,
+      [userId, accountId],
+    );
+    if (!rows.length)
+      throw new NotFoundException('Confirmed account not found');
+    return rows;
   }
 
   async versions(userId: string, accountId: string, targetId: string) {
@@ -168,9 +214,13 @@ export class MvpAuditService {
       throw new BadRequestException('Idempotency-Key must be a UUID');
     key = key.toLowerCase();
     const input = this.normalize(dto);
+    if (isI5Action(input.action) && dto.confirmed !== true)
+      throw new BadRequestException('Confirm the reviewed change explicitly');
     const revision = dto.expectedRevision;
+    const terms = ['mvp.audit.confirm', 1, userId, input, revision];
+    if (isI5Action(input.action)) terms.push(dto.previewToken);
     const hash = createHash('sha256')
-      .update(JSON.stringify(['mvp.audit.confirm', 1, userId, input, revision]))
+      .update(JSON.stringify(terms))
       .digest('hex');
     const client = await this.db.getClient();
     try {
@@ -216,7 +266,12 @@ export class MvpAuditService {
           'Request a preview of this change',
         );
       }
-      await this.project(client, userId, input);
+      const projection = await this.project(client, userId, input);
+      if (projection.ambiguousMovementIds?.length)
+        this.conflict(
+          'OCCURRENCE_TIME_REQUIRED',
+          'Resolve the ambiguous movements before changing the base',
+        );
       const id = randomUUID();
       const params = [
         id,
@@ -228,7 +283,28 @@ export class MvpAuditService {
         input.reason,
       ];
       let receipt: AuditReceipt;
-      if (input.action === 'replace_check') {
+      if (isBaseAction(input.action)) {
+        const {
+          rows: [version],
+        } = await client.query<AuditReceipt>(
+          `INSERT INTO mvp_base_versions
+           (id,user_id,account_id,revision,action,base_minor,coverage_start,reason,write_key)
+           VALUES ($1,$2,$3,$4::bigint + 1,$5,$6,$7,$8,$9)
+           RETURNING ${baseVersionFields}`,
+          [
+            id,
+            userId,
+            input.accountId,
+            revision,
+            input.action,
+            projection.proposedBaseMinor,
+            projection.proposedCoverageStart,
+            input.reason,
+            key,
+          ],
+        );
+        receipt = version;
+      } else if (input.action === 'replace_check') {
         const {
           rows: [check],
         } = await client.query<AuditReceipt>(
@@ -303,8 +379,15 @@ export class MvpAuditService {
     input: MvpAuditInput,
   ) {
     const scope = [userId, input.accountId, input.targetId];
-    const result =
-      input.action === 'replace_check'
+    const result = isBaseAction(input.action)
+      ? await db.query<AuditProjection>(basePreviewSql, [
+          userId,
+          input.accountId,
+          input.baseMinor ?? null,
+          input.coverageStart ?? null,
+          input.action === 'suspend_base',
+        ])
+      : input.action === 'replace_check'
         ? await db.query<AuditProjection>(replacementPreviewSql, [
             ...scope,
             input.referenceAt,
@@ -317,9 +400,12 @@ export class MvpAuditService {
             input.description?.trim() || null,
             input.occurredAt ?? null,
             input.action === 'invalidate',
+            input.action === 'refine_occurrence',
           ]);
     const [projection] = result.rows;
     if (!projection) throw new NotFoundException('Audited target not found');
+    if (projection.suspended)
+      this.conflict('BASE_SUSPENDED', 'The opening balance is under review');
     if (projection.blocked)
       this.conflict(
         'AUDIT_TARGET_INACTIVE',
@@ -350,10 +436,24 @@ export class MvpAuditService {
       dto.description != null ||
       dto.occurredAt != null;
     const observation = dto.observedMinor != null || dto.referenceAt != null;
+    const baseAction = isBaseAction(dto.action);
+    const baseTerms = dto.baseMinor != null || dto.coverageStart != null;
     if (
       !reason ||
       reason.includes('\u0000') ||
       dto.description?.includes('\u0000') ||
+      (!baseAction && baseTerms) ||
+      (baseAction &&
+        (change ||
+          observation ||
+          dto.targetId.toLowerCase() !== dto.accountId.toLowerCase())) ||
+      (dto.action === 'correct_base' && dto.baseMinor == null) ||
+      (dto.action === 'suspend_base' && baseTerms) ||
+      (dto.action === 'refine_occurrence' &&
+        (!dto.occurredAt ||
+          dto.amountMinor != null ||
+          dto.description != null ||
+          observation)) ||
       (dto.action === 'correct' && (!change || observation)) ||
       (dto.action === 'invalidate' && (change || observation)) ||
       (dto.action === 'replace_check' &&
@@ -363,14 +463,12 @@ export class MvpAuditService {
         'Provide a reason and only the fields allowed for this operation',
       );
     }
+    const signedMinor = dto.baseMinor ?? dto.observedMinor;
     if (
-      dto.observedMinor != null &&
-      (BigInt(dto.observedMinor) < -(1n << 63n) ||
-        BigInt(dto.observedMinor) >= 1n << 63n)
+      signedMinor != null &&
+      (BigInt(signedMinor) < -(1n << 63n) || BigInt(signedMinor) >= 1n << 63n)
     ) {
-      throw new BadRequestException(
-        'Observed balance is outside the supported range',
-      );
+      throw new BadRequestException('Balance is outside the supported range');
     }
     const utc = (input?: string) => {
       if (!input) return undefined;
@@ -387,6 +485,8 @@ export class MvpAuditService {
       occurredAt: utc(dto.occurredAt),
       observedMinor: dto.observedMinor ?? undefined,
       referenceAt: utc(dto.referenceAt),
+      baseMinor: dto.baseMinor ?? undefined,
+      coverageStart: utc(dto.coverageStart),
     };
   }
 

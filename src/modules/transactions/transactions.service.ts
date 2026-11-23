@@ -146,6 +146,13 @@ export class TransactionsService {
           message: 'Account revision changed',
         });
       }
+      if (constraint === 'mvp_base_suspended') {
+        throw new ConflictException({
+          statusCode: 409,
+          code: 'BASE_SUSPENDED',
+          message: 'The opening balance is under review',
+        });
+      }
       if (constraint === 'mvp_transaction_base_required') {
         throw new ConflictException({
           statusCode: 409,

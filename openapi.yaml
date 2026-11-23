@@ -236,7 +236,7 @@ paths:
           $ref: '#/components/responses/MvpUnavailable'
   /mvp/audit-previews:
     post:
-      summary: Preview a movement correction, invalidation or check replacement
+      summary: Preview an audited financial change
       operationId: previewMvpAuditedChange
       security:
         - bearerAuth: []
@@ -249,7 +249,7 @@ paths:
               unevaluatedProperties: false
       responses:
         '200':
-          description: Read-only projection at one revision with a token bound to the holder and reviewed terms.
+          description: Read-only projection at one revision. The token is absent as a usable value when a proposed start bisects date-only movements.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MvpAuditPreview' }
@@ -283,6 +283,19 @@ paths:
                     expectedRevision:
                       { type: string, pattern: '^[1-9][0-9]{0,18}$' }
                     previewToken: { type: string, pattern: '^[0-9a-f]{64}$' }
+                    confirmed:
+                      type: boolean
+                      description: Must be true for suspend_base, correct_base and refine_occurrence.
+                  if:
+                    properties:
+                      action:
+                        {
+                          enum: [suspend_base, correct_base, refine_occurrence],
+                        }
+                  then:
+                    required: [confirmed]
+                    properties:
+                      confirmed: { const: true }
               unevaluatedProperties: false
       responses:
         '201':
@@ -295,6 +308,27 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/MvpConflict' }
         '503': { $ref: '#/components/responses/MvpUnavailable' }
+  /mvp/account/{accountId}/base-versions:
+    get:
+      summary: List the confirmed opening balance, suspensions and subsequent versions
+      operationId: listMvpBaseVersions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Immutable owner-only audit history in descending revision order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MvpBaseVersion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /mvp/account/{accountId}/history/{movementId}/versions:
     get:
       summary: List the original and audited versions of a movement
@@ -701,7 +735,17 @@ components:
           description: Explicit legacy adoption target. Adoption remains blocked.
     MvpAccountSummary:
       type: object
-      required: [principalId, account, legacyAccounts, status, base, balanceMinor, revision, asOf]
+      required:
+        [
+          principalId,
+          account,
+          legacyAccounts,
+          status,
+          base,
+          balanceMinor,
+          revision,
+          asOf,
+        ]
       properties:
         principalId: { type: string, format: uuid }
         account:
@@ -726,6 +770,9 @@ components:
         balanceMinor:
           type: [string, 'null']
           description: Exact signed minor units. Null when unavailable.
+        baseSuspended:
+          type: [boolean, 'null']
+          description: True while the owner has suspended figures for review.
         revision:
           type: [string, 'null']
           description: Monotonic decimal revision, present for the active MVP account.
@@ -854,17 +901,27 @@ components:
             allOf:
               - $ref: '#/components/schemas/MvpCheckReceipt'
               - type: object
-                required: [calculatedAtReferenceMinor, remainingDifferenceMinor, status]
+                required:
+                  [calculatedAtReferenceMinor, remainingDifferenceMinor, status]
                 properties:
-                  calculatedAtReferenceMinor: { type: string, pattern: '^(0|-?[1-9][0-9]*)$' }
-                  remainingDifferenceMinor: { type: string, pattern: '^(0|-?[1-9][0-9]*)$' }
+                  calculatedAtReferenceMinor:
+                    { type: [string, 'null'], pattern: '^(0|-?[1-9][0-9]*)$' }
+                  remainingDifferenceMinor:
+                    { type: [string, 'null'], pattern: '^(0|-?[1-9][0-9]*)$' }
                   status:
                     type: string
-                    enum: [open, coincident]
+                    enum: [open, coincident, unavailable]
                     description: Backward-compatible state. Nonzero remaining difference is open. Zero is numerically coincident.
                   resolutionStatus:
                     type: string
-                    enum: [open, coincident, partially_explained, resolved]
+                    enum:
+                      [
+                        open,
+                        coincident,
+                        partially_explained,
+                        resolved,
+                        unavailable,
+                      ]
                     description: The resolved state requires traceable linked expense deltas that fully explain the original difference.
                   supersededBy: { type: [string, 'null'], format: uuid }
                   replacesCheckId: { type: [string, 'null'], format: uuid }
@@ -875,11 +932,23 @@ components:
     MvpAuditFields:
       type: object
       required: [accountId, targetId, action, reason]
-      description: 'Use the movement ID for correct or invalidate, and the observation ID for replace_check. Correct requires at least one changed field. Invalidate only takes the common fields. Replacement requires observedMinor and referenceAt.'
+      description: 'Use the movement ID for correct or invalidate, and the observation ID for replace_check. Correct requires at least one changed field. Invalidate only takes the common fields. Replacement requires observedMinor and referenceAt. Base actions use accountId as targetId. Correction requires an explicit baseMinor and may include coverageStart. Suspension takes only the common fields. Refinement accepts occurredAt within the stored date-only interval and uses the movement ID.'
       properties:
         accountId: { type: string, format: uuid }
         targetId: { type: string, format: uuid }
-        action: { type: string, enum: [correct, invalidate, replace_check] }
+        action:
+          {
+            type: string,
+            enum:
+              [
+                correct,
+                invalidate,
+                replace_check,
+                suspend_base,
+                correct_base,
+                refine_occurrence,
+              ],
+          }
         reason: { type: string, minLength: 1, maxLength: 1000 }
         amountMinor: { type: string, pattern: '^[1-9][0-9]{0,8}$' }
         description:
@@ -892,6 +961,13 @@ components:
           description: Precise UTC instant. Omit to preserve existing occurrence precision.
         observedMinor: { type: string, pattern: '^(0|-?[1-9][0-9]{0,18})$' }
         referenceAt: { type: string, format: date-time }
+        baseMinor: { type: string, pattern: '^(0|-?[1-9][0-9]{0,18})$' }
+        coverageStart:
+          {
+            type: string,
+            format: date-time,
+            description: Precise UTC instant. Omit to keep the existing start.,
+          }
     MvpAuditPreview:
       type: object
       required:
@@ -908,9 +984,29 @@ components:
         accountId: { type: string, format: uuid }
         targetId: { type: string, format: uuid }
         revision: { type: string }
-        balanceMinor: { type: string }
-        projectedBalanceMinor: { type: string }
-        previewToken: { type: string, pattern: '^[0-9a-f]{64}$' }
+        balanceMinor: { type: [string, 'null'] }
+        projectedBalanceMinor: { type: [string, 'null'] }
+        previewToken: { type: [string, 'null'], pattern: '^[0-9a-f]{64}$' }
+        previousBaseMinor: { type: string }
+        previousCoverageStart: { type: string, format: date-time }
+        proposedBaseMinor: { type: string }
+        proposedCoverageStart: { type: string, format: date-time }
+        ambiguousMovementIds:
+          type: array
+          items: { type: string, format: uuid }
+        coverageChanges:
+          type: array
+          items:
+            type: object
+            required:
+              [id, description, occurrenceDay, occurredAt, before, after]
+            properties:
+              id: { type: string, format: uuid }
+              description: { type: [string, 'null'] }
+              occurrenceDay: { type: [string, 'null'], format: date }
+              occurredAt: { type: [string, 'null'], format: date-time }
+              before: { enum: [covered, before_base] }
+              after: { enum: [covered, before_base, ambiguous] }
         checks:
           type: array
           items:
@@ -927,8 +1023,8 @@ components:
               id: { type: string, format: uuid }
               referenceAt: { type: string, format: date-time }
               originalDifferenceMinor: { type: string }
-              beforeMinor: { type: string }
-              afterMinor: { type: string }
+              beforeMinor: { type: [string, 'null'] }
+              afterMinor: { type: [string, 'null'] }
     MvpAuditReceipt:
       type: object
       required: [id, accountId, authorId, revision, createdAt, action, reason]
@@ -938,8 +1034,23 @@ components:
         authorId: { type: string, format: uuid }
         revision: { type: string }
         createdAt: { type: string, format: date-time }
-        action: { type: string, enum: [correct, invalidate, replace_check] }
+        action:
+          {
+            type: string,
+            enum:
+              [
+                correct,
+                invalidate,
+                replace_check,
+                suspend_base,
+                correct_base,
+                refine_occurrence,
+              ],
+          }
         reason: { type: string }
+        baseMinor: { type: string }
+        coverageStart: { type: string, format: date-time }
+        referenceZone: { type: string }
         transactionId: { type: string, format: uuid }
         replacesCheckId: { type: string, format: uuid }
         observedMinor: { type: string }
@@ -947,6 +1058,32 @@ components:
         baseConfirmedAt: { type: string, format: date-time }
         originalCalculatedMinor: { type: string }
         originalDifferenceMinor: { type: string }
+    MvpBaseVersion:
+      type: object
+      required:
+        [
+          id,
+          accountId,
+          authorId,
+          revision,
+          action,
+          reason,
+          baseMinor,
+          coverageStart,
+          referenceZone,
+          createdAt,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        authorId: { type: string, format: uuid }
+        revision: { type: string }
+        action: { enum: [original, suspend_base, correct_base] }
+        reason: { type: [string, 'null'] }
+        baseMinor: { type: string }
+        coverageStart: { type: string, format: date-time }
+        referenceZone: { type: string }
+        createdAt: { type: string, format: date-time }
     MvpMovementVersion:
       type: object
       required:
@@ -964,7 +1101,11 @@ components:
         ]
       properties:
         id: { type: string, format: uuid }
-        action: { type: string, enum: [original, correct, invalidate] }
+        action:
+          {
+            type: string,
+            enum: [original, correct, invalidate, refine_occurrence],
+          }
         authorId: { type: string, format: uuid }
         reason: { type: [string, 'null'] }
         amountMinor: { type: string }
@@ -1292,7 +1433,21 @@ components:
             properties:
               statusCode: { const: 409 }
               code:
-                enum: [IDEMPOTENCY_CONFLICT, MVP_ACCOUNT_EXISTS, LEGACY_ADOPTION_BLOCKED, BASE_REQUIRED, STALE_REVISION, OCCURRENCE_TIME_REQUIRED, EXTERNAL_REFERENCE_CONFLICT, MOVEMENT_ALREADY_LINKED, MOVEMENT_INELIGIBLE, AUDIT_PREVIEW_REQUIRED, AUDIT_TARGET_INACTIVE]
+                enum:
+                  [
+                    IDEMPOTENCY_CONFLICT,
+                    MVP_ACCOUNT_EXISTS,
+                    LEGACY_ADOPTION_BLOCKED,
+                    BASE_REQUIRED,
+                    STALE_REVISION,
+                    OCCURRENCE_TIME_REQUIRED,
+                    EXTERNAL_REFERENCE_CONFLICT,
+                    MOVEMENT_ALREADY_LINKED,
+                    MOVEMENT_INELIGIBLE,
+                    AUDIT_PREVIEW_REQUIRED,
+                    AUDIT_TARGET_INACTIVE,
+                    BASE_SUSPENDED,
+                  ]
               message: { type: string }
     AuthTokens:
       description: Access token and a new opaque refresh token.

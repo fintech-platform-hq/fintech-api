@@ -58,6 +58,15 @@ export class MvpAccountController {
     return this.audit.confirm(request.principal.userId, key, dto);
   }
 
+  @Get('account/:accountId/base-versions')
+  @Header('Cache-Control', 'no-store')
+  baseVersions(
+    @Req() request: AuthenticatedRequest,
+    @Param('accountId', ParseUUIDPipe) accountId: string,
+  ) {
+    return this.audit.baseVersions(request.principal.userId, accountId);
+  }
+
   @Get('account/:accountId/history/:movementId/versions')
   @Header('Cache-Control', 'no-store')
   movementVersions(

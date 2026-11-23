@@ -25,6 +25,7 @@ export interface MvpAccountSummary {
     confirmedAt: string;
   } | null;
   balanceMinor: string | null;
+  baseSuspended?: boolean | null;
   revision: string | null;
   asOf: string;
 }
@@ -47,7 +48,7 @@ export const summarySql = (cut = 'statement_timestamp()') => `
     CASE
       WHEN a.id IS NULL THEN 'no_account'
       WHEN m.account_id IS NULL THEN 'base_required'
-      WHEN p.cut < m.coverage_start THEN 'unavailable'
+      WHEN m.base_suspended OR p.cut < m.coverage_start THEN 'unavailable'
       ELSE 'available'
     END AS status,
     CASE WHEN m.account_id IS NOT NULL THEN
@@ -55,7 +56,9 @@ export const summarySql = (cut = 'statement_timestamp()') => `
         'coverageStart', to_char(m.coverage_start AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
         'referenceZone', m.reference_zone, 'confirmedAt', m.confirmed_at)
     END AS base,
-    mvp_balance_at(p.principal, m.account_id, m.base_minor, m.coverage_start, p.cut)::text AS "balanceMinor",
+    CASE WHEN m.base_suspended THEN true END AS "baseSuspended",
+    CASE WHEN NOT m.base_suspended THEN
+      mvp_balance_at(p.principal, m.account_id, m.base_minor, m.coverage_start, p.cut)::text END AS "balanceMinor",
     m.revision::text AS revision
   FROM params p
   LEFT JOIN mvp_accounts m ON m.user_id = p.principal
