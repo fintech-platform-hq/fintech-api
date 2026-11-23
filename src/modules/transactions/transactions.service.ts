@@ -52,7 +52,7 @@ export class TransactionsService {
       await client.query('BEGIN');
 
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-        `${userId}:${idempotencyKey}`,
+        `${userId}:${idempotencyKey.toLowerCase()}`,
       ]);
 
       const idempotencyResult = await client.query<IdempotencyKeyRow>(
