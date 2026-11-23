@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Fintech API
   version: 0.0.1
-  description: Public contract for authenticated transaction creation with account and category ownership.
+  description: Public contract for authenticated accounts, personal balances and transaction creation.
 servers:
   - url: https://fintech-api-87yw.onrender.com
     description: Production
@@ -10,6 +10,92 @@ servers:
     description: Local development
 security: []
 paths:
+  /mvp/account:
+    get:
+      summary: Read the authenticated personal-account summary
+      operationId: getMvpAccount
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/MvpAccountSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/MvpUnavailable'
+    post:
+      summary: Confirm opening a new personal BRL account with its opening balance
+      description: An explicit accountId requests legacy adoption, which is blocked in I1-A. An identical confirmed request replays its original result.
+      operationId: openMvpAccount
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        $ref: '#/components/requestBodies/MvpOpening'
+      responses:
+        '201':
+          $ref: '#/components/responses/MvpAccountSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/MvpConflict'
+        '503':
+          $ref: '#/components/responses/MvpUnavailable'
+  /mvp/account/{accountId}:
+    get:
+      summary: Read the financial state of an owned BRL account by ID
+      operationId: getOwnMvpAccount
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          $ref: '#/components/responses/MvpAccountSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/MvpUnavailable'
+  /mvp/account-previews:
+    post:
+      summary: Review opening terms without persisting any effect
+      operationId: previewMvpOpening
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: '#/components/requestBodies/MvpOpening'
+      responses:
+        '200':
+          description: Validated opening terms to confirm explicitly.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MvpOpening'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/MvpConflict'
+        '503':
+          $ref: '#/components/responses/MvpUnavailable'
   /auth/register:
     post:
       summary: Register with email and password
@@ -243,6 +329,13 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 components:
+  requestBodies:
+    MvpOpening:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/MvpOpening'
   securitySchemes:
     bearerAuth:
       type: http
@@ -255,6 +348,60 @@ components:
         type: string
         format: uuid
   schemas:
+    MvpOpening:
+      type: object
+      additionalProperties: false
+      required: [baseMinor, coverageStart, referenceZone]
+      properties:
+        baseMinor:
+          type: string
+          pattern: '^(0|-?[1-9][0-9]{0,18})$'
+          description: Signed Int64 in minor units.
+          examples: ['0', '-5500']
+        coverageStart:
+          type: string
+          format: date-time
+          description: UTC timestamp ending in Z, up to six fractional digits, at or before server time.
+        referenceZone:
+          type: string
+          maxLength: 64
+          description: IANA reference zone used for displaying the chosen instant.
+          examples: [America/Sao_Paulo]
+        accountId:
+          type: string
+          format: uuid
+          description: Explicit legacy adoption target. Adoption is blocked in I1-A.
+    MvpAccountSummary:
+      type: object
+      required: [principalId, account, legacyAccounts, status, base, balanceMinor, revision, asOf]
+      properties:
+        principalId: { type: string, format: uuid }
+        account:
+          oneOf:
+            - $ref: '#/components/schemas/AccountResponse'
+            - type: 'null'
+        legacyAccounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccountResponse'
+        status:
+          type: string
+          enum: [no_account, base_required, unavailable, available]
+        base:
+          type: [object, 'null']
+          required: [baseMinor, coverageStart, referenceZone, confirmedAt]
+          properties:
+            baseMinor: { type: string }
+            coverageStart: { type: string, format: date-time }
+            referenceZone: { type: string }
+            confirmedAt: { type: string, format: date-time }
+        balanceMinor:
+          type: [string, 'null']
+          description: Exact signed minor units. Null when unavailable.
+        revision:
+          type: [string, 'null']
+          description: Monotonic decimal revision, present for the active MVP account.
+        asOf: { type: string, format: date-time }
     Credentials:
       type: object
       additionalProperties: false
@@ -448,6 +595,30 @@ components:
           type: string
           const: ACCOUNT_LINK_REQUIRED
   responses:
+    MvpAccountSummary:
+      description: Account, base, revision and balance at one server cut. For opening, this is the canonical receipt.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/MvpAccountSummary'
+    MvpUnavailable:
+      description: Temporary financial persistence failure or lock timeout. Retry a confirmation with the original key and payload.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    MvpConflict:
+      description: Incompatible idempotency key, existing active account, or blocked legacy adoption.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [statusCode, code, message]
+            properties:
+              statusCode: { const: 409 }
+              code:
+                enum: [IDEMPOTENCY_CONFLICT, MVP_ACCOUNT_EXISTS, LEGACY_ADOPTION_BLOCKED]
+              message: { type: string }
     AuthTokens:
       description: Access token and a new opaque refresh token.
       content:

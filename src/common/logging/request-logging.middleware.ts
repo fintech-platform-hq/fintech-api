@@ -19,10 +19,11 @@ export class RequestLoggingMiddleware implements NestMiddleware {
       const responseTime =
         Number(process.hrtime.bigint() - startedAt) / 1_000_000;
 
+      const route = request.route as { path?: unknown } | undefined;
       this.logger.log({
         requestId,
         method: request.method,
-        path: request.originalUrl ?? request.url,
+        path: typeof route?.path === 'string' ? route.path : undefined,
         statusCode: response.statusCode,
         responseTimeMs: Math.round(responseTime * 100) / 100,
       });
