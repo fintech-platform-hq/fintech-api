@@ -29,7 +29,7 @@ export interface MvpAccountSummary {
   asOf: string;
 }
 
-const summarySql = (cut = 'statement_timestamp()') => `
+export const summarySql = (cut = 'statement_timestamp()') => `
   WITH params AS (
     SELECT $1::uuid AS principal, $2::uuid AS target, ${cut} AS cut
   )
@@ -55,12 +55,7 @@ const summarySql = (cut = 'statement_timestamp()') => `
         'coverageStart', to_char(m.coverage_start AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
         'referenceZone', m.reference_zone, 'confirmedAt', m.confirmed_at)
     END AS base,
-    CASE WHEN p.cut >= m.coverage_start THEN (m.base_minor + COALESCE((
-      SELECT sum(CASE t.type WHEN 'income' THEN t.amount_minor::bigint ELSE -t.amount_minor::bigint END)
-      FROM transactions t
-      WHERE t.user_id = p.principal AND t.account_id = m.account_id
-        AND t.occurred_at BETWEEN m.coverage_start AND p.cut
-    ), 0))::text END AS "balanceMinor",
+    mvp_balance_at(p.principal, m.account_id, m.base_minor, m.coverage_start, p.cut)::text AS "balanceMinor",
     m.revision::text AS revision
   FROM params p
   LEFT JOIN mvp_accounts m ON m.user_id = p.principal

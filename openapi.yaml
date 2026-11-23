@@ -128,6 +128,110 @@ paths:
           $ref: '#/components/responses/MvpConflict'
         '503':
           $ref: '#/components/responses/MvpUnavailable'
+  /mvp/check-previews:
+    post:
+      summary: Preview a dated balance check
+      operationId: previewMvpBalanceCheck
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MvpCheckInput'
+      responses:
+        '200':
+          description: Read-only calculation at the requested cut and account revision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MvpCheckPreview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/MvpConflict'
+        '503':
+          $ref: '#/components/responses/MvpUnavailable'
+  /mvp/checks:
+    post:
+      summary: Confirm an immutable balance check
+      description: Advances the account revision atomically with the observation and receipt. Creates zero movements. Compatible replay returns the original receipt before validating the current revision.
+      operationId: confirmMvpBalanceCheck
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MvpCheckConfirmation'
+      responses:
+        '201':
+          description: Original confirmed observation, including on compatible replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MvpCheckReceipt'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/MvpConflict'
+        '503':
+          $ref: '#/components/responses/MvpUnavailable'
+  /mvp/account/{accountId}/checks:
+    get:
+      summary: Read an account's balance checks or open discrepancies
+      description: Returns the current balance and the page from one account revision. Ordered by reference time, recording time, and ID, all descending.
+      operationId: listMvpBalanceChecks
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: view
+          in: query
+          schema: { type: string, enum: [all, pending], default: all }
+        - name: after
+          in: query
+          description: Previous nextAfter. Supply together with the previous summary revision and keep the same view.
+          schema: { type: string, format: uuid }
+        - name: revision
+          in: query
+          description: Previous page summary revision. A revision change requires restarting pagination.
+          schema: { type: string, pattern: '^[1-9][0-9]{0,18}$' }
+      responses:
+        '200':
+          description: Account summary and historical checks with the current discrepancy at each reference time.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MvpChecksPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/MvpConflict'
+        '503':
+          $ref: '#/components/responses/MvpUnavailable'
   /mvp/transactions:
     post:
       summary: Register an income or expense in the active personal account
@@ -519,6 +623,85 @@ components:
                 properties:
                   coverage: { type: string, enum: [covered, before_base, after_cut, no_base] }
         nextCursor: { type: [string, 'null'] }
+    MvpCheckFields:
+      type: object
+      required: [accountId, observedMinor, referenceAt]
+      properties:
+        accountId: { type: string, format: uuid }
+        observedMinor:
+          type: string
+          pattern: '^(0|-?[1-9][0-9]{0,18})$'
+          description: Canonical signed Int64 in minor units. Explicit zero is allowed.
+        referenceAt:
+          type: string
+          format: date-time
+          description: UTC timestamp ending in Z with up to six fractional digits. The account coverage start and server time are inclusive.
+    MvpCheckInput:
+      allOf:
+        - $ref: '#/components/schemas/MvpCheckFields'
+      unevaluatedProperties: false
+    MvpCheckPreview:
+      allOf:
+        - $ref: '#/components/schemas/MvpCheckFields'
+        - type: object
+          required: [revision, calculatedMinor, differenceMinor]
+          properties:
+            revision: { type: string }
+            calculatedMinor: { type: string, pattern: '^(0|-?[1-9][0-9]*)$' }
+            differenceMinor:
+              type: string
+              pattern: '^(0|-?[1-9][0-9]*)$'
+              description: Calculated balance at the reference time minus observed balance.
+    MvpCheckConfirmation:
+      allOf:
+        - $ref: '#/components/schemas/MvpCheckFields'
+        - type: object
+          required: [expectedRevision]
+          properties:
+            expectedRevision:
+              type: string
+              pattern: '^[1-9][0-9]{0,18}$'
+              description: Account revision returned by the preview.
+      unevaluatedProperties: false
+    MvpCheckReceipt:
+      allOf:
+        - $ref: '#/components/schemas/MvpCheckFields'
+        - type: object
+          required: [id, authorId, revision, createdAt, baseConfirmedAt, originalCalculatedMinor, originalDifferenceMinor]
+          properties:
+            id: { type: string, format: uuid }
+            authorId: { type: string, format: uuid }
+            revision:
+              type: string
+              description: Account revision after confirmation. Confirmation does not change the balance.
+            createdAt: { type: string, format: date-time }
+            baseConfirmedAt: { type: string, format: date-time }
+            originalCalculatedMinor: { type: string, pattern: '^(0|-?[1-9][0-9]*)$' }
+            originalDifferenceMinor: { type: string, pattern: '^(0|-?[1-9][0-9]*)$' }
+    MvpChecksPage:
+      type: object
+      required: [summary, entries, nextAfter]
+      properties:
+        summary:
+          $ref: '#/components/schemas/MvpAccountSummary'
+        entries:
+          type: array
+          maxItems: 50
+          items:
+            allOf:
+              - $ref: '#/components/schemas/MvpCheckReceipt'
+              - type: object
+                required: [calculatedAtReferenceMinor, remainingDifferenceMinor, status]
+                properties:
+                  calculatedAtReferenceMinor: { type: string, pattern: '^(0|-?[1-9][0-9]*)$' }
+                  remainingDifferenceMinor: { type: string, pattern: '^(0|-?[1-9][0-9]*)$' }
+                  status:
+                    type: string
+                    enum: [open, coincident]
+                    description: Nonzero remaining difference is open. Zero is numeric coincidence at the cut.
+        nextAfter:
+          type: [string, 'null']
+          format: uuid
     Credentials:
       type: object
       additionalProperties: false

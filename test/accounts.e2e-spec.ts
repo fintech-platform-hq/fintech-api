@@ -123,6 +123,75 @@ describe('Accounts API (e2e)', () => {
       .expect(401);
   });
 
+  describe('balance check envelope', () => {
+    const input = {
+      accountId: account.id,
+      observedMinor: '80000',
+      referenceAt: '2026-01-01T12:00:00.123456Z',
+    };
+
+    it('requires authentication for preview, confirmation and checks', async () => {
+      await request(app.getHttpServer())
+        .post('/mvp/check-previews')
+        .send(input)
+        .expect(401);
+      await request(app.getHttpServer())
+        .post('/mvp/checks')
+        .send(input)
+        .expect(401);
+      await request(app.getHttpServer())
+        .get(`/mvp/account/${account.id}/checks`)
+        .expect(401);
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { observedMinor: 80000 },
+      { observedMinor: '-0' },
+      { observedMinor: '1.5' },
+      { referenceAt: '2026-02-30T00:00:00Z' },
+      { referenceAt: '2026-01-01T12:00:00' },
+      { referenceAt: '2026-01-01T12:00:00.1234567Z' },
+      { authorId: userId },
+    ])('rejects invalid preview fields %j before storage', async (changes) => {
+      await request(app.getHttpServer())
+        .post('/mvp/check-previews')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({ ...input, ...changes })
+        .expect(400);
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it('requires a UUID confirmation key and a valid revision', async () => {
+      const confirm = () =>
+        request(app.getHttpServer())
+          .post('/mvp/checks')
+          .set('Authorization', `Bearer ${accessToken}`);
+      await confirm()
+        .send({ ...input, expectedRevision: '1' })
+        .expect(400);
+      await confirm()
+        .set('Idempotency-Key', userId)
+        .send({ ...input, expectedRevision: '0' })
+        .expect(400);
+      await confirm()
+        .set('Idempotency-Key', userId)
+        .send({ ...input, expectedRevision: '9223372036854775808' })
+        .expect(400);
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it('rejects an incomplete page key and unknown view', async () => {
+      const list = () =>
+        request(app.getHttpServer())
+          .get(`/mvp/account/${account.id}/checks`)
+          .set('Authorization', `Bearer ${accessToken}`);
+      await list().query({ after: userId }).expect(400);
+      await list().query({ view: 'resolved' }).expect(400);
+      expect(query).not.toHaveBeenCalled();
+    });
+  });
+
   afterAll(async () => app.close());
 });
 
