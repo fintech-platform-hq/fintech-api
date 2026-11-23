@@ -7,10 +7,11 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
-import { isUUID } from 'class-validator';
+import { isISO8601, isUUID } from 'class-validator';
 import { DatabaseService } from '../../common/database/database.service';
 import { AccountResponseDto } from './dto/account-response.dto';
 import { MvpOpeningDto } from './mvp-opening.dto';
+import type { MvpTransactionReceipt } from '../transactions/dto/mvp-transaction.dto';
 
 export interface MvpAccountSummary {
   principalId: string;
@@ -28,9 +29,9 @@ export interface MvpAccountSummary {
   asOf: string;
 }
 
-const summarySql = `
+const summarySql = (cut = 'statement_timestamp()') => `
   WITH params AS (
-    SELECT $1::uuid AS principal, $2::uuid AS target, statement_timestamp() AS cut
+    SELECT $1::uuid AS principal, $2::uuid AS target, ${cut} AS cut
   )
   SELECT p.principal AS "principalId",
     to_char(p.cut AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "asOf",
@@ -68,6 +69,50 @@ const summarySql = `
     AND a.user_id = p.principal AND a.currency = 'BRL'
 `;
 
+type HistoryEntry = Omit<MvpTransactionReceipt, 'revision'> & {
+  coverage: 'covered' | 'before_base' | 'after_cut' | 'no_base';
+};
+
+interface HistoryCursor {
+  accountId: string;
+  asOf: string;
+  version: string;
+  occurredAt: string;
+  id: string;
+}
+
+const historySql = `
+  WITH summary AS (
+    ${summarySql('COALESCE($3::timestamptz, statement_timestamp())')}
+  )
+  SELECT to_jsonb(s) AS summary,
+    COALESCE(s.revision, (
+      SELECT md5(COALESCE(string_agg(t.id::text || ':' || t.xmin::text, ',' ORDER BY t.id), ''))
+      FROM transactions t WHERE t.user_id = $1 AND t.account_id = $2
+    )) AS version,
+    COALESCE(entries.items, '[]'::jsonb) AS entries
+  FROM summary s
+  LEFT JOIN LATERAL (
+    SELECT jsonb_agg(to_jsonb(page) ORDER BY page."occurredAt" DESC, page.id DESC) AS items
+    FROM (
+      SELECT t.id, t.account_id AS "accountId", t.type, t.amount_minor::text AS "amountMinor",
+        t.currency, t.description,
+        to_char(t.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt",
+        to_char(t.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt",
+        CASE
+          WHEN s.base IS NULL THEN 'no_base'
+          WHEN t.occurred_at < (s.base->>'coverageStart')::timestamptz THEN 'before_base'
+          WHEN t.occurred_at > s."asOf"::timestamptz THEN 'after_cut'
+          ELSE 'covered'
+        END AS coverage
+      FROM transactions t
+      WHERE s.account IS NOT NULL AND t.user_id = $1 AND t.account_id = $2
+        AND ($4::timestamptz IS NULL OR (t.occurred_at, t.id) < ($4, $5::uuid))
+      ORDER BY t.occurred_at DESC, t.id DESC LIMIT 51
+    ) page
+  ) entries ON true
+`;
+
 @Injectable()
 export class MvpAccountService {
   constructor(private readonly db: DatabaseService) {}
@@ -75,7 +120,7 @@ export class MvpAccountService {
   async read(userId: string, accountId?: string): Promise<MvpAccountSummary> {
     const {
       rows: [summary],
-    } = await this.db.query<MvpAccountSummary>(summarySql, [
+    } = await this.db.query<MvpAccountSummary>(summarySql(), [
       userId,
       accountId ?? null,
     ]);
@@ -83,6 +128,71 @@ export class MvpAccountService {
       throw new NotFoundException('Account not found');
     }
     return summary;
+  }
+
+  async history(userId: string, accountId: string, token?: string) {
+    accountId = accountId.toLowerCase();
+    const cursor =
+      token === undefined ? null : this.historyCursor(token, accountId);
+    const {
+      rows: [page],
+    } = await this.db.query<{
+      summary: MvpAccountSummary;
+      version: string;
+      entries: HistoryEntry[];
+    }>(historySql, [
+      userId,
+      accountId,
+      cursor?.asOf ?? null,
+      cursor?.occurredAt ?? null,
+      cursor?.id ?? null,
+    ]);
+    if (!page.summary.account) throw new NotFoundException('Account not found');
+    if (cursor && cursor.version !== page.version) {
+      this.conflict('STALE_REVISION', 'History changed; reload the account');
+    }
+    const entries = page.entries.slice(0, 50);
+    const last = entries.at(-1);
+    const nextCursor =
+      last && page.entries.length > entries.length
+        ? Buffer.from(
+            JSON.stringify({
+              accountId,
+              version: page.version,
+              asOf: page.summary.asOf,
+              occurredAt: last.occurredAt,
+              id: last.id,
+            } satisfies HistoryCursor),
+          ).toString('base64url')
+        : null;
+    return { summary: page.summary, entries, nextCursor };
+  }
+
+  private historyCursor(token: string, accountId: string): HistoryCursor {
+    const validTimestamp = (value: string) =>
+      typeof value === 'string' &&
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(value) &&
+      !value.startsWith('0000') &&
+      isISO8601(value, { strict: true });
+    try {
+      if (!/^[A-Za-z0-9_-]{1,600}$/.test(token)) throw new Error();
+      const cursor = JSON.parse(
+        Buffer.from(token, 'base64url').toString(),
+      ) as HistoryCursor;
+      if (
+        cursor.accountId === accountId &&
+        isUUID(cursor.id) &&
+        typeof cursor.version === 'string' &&
+        /^(?:[1-9]\d{0,18}|[a-f0-9]{32})$/.test(cursor.version) &&
+        validTimestamp(cursor.asOf) &&
+        validTimestamp(cursor.occurredAt)
+      ) {
+        return cursor;
+      }
+    } catch {
+      // A malformed cursor never reaches the database.
+    }
+    throw new BadRequestException('Invalid history cursor');
   }
 
   async preview(userId: string, dto: MvpOpeningDto): Promise<MvpOpeningDto> {
@@ -205,7 +315,7 @@ export class MvpAccountService {
 
       const {
         rows: [summary],
-      } = await client.query<MvpAccountSummary>(summarySql, [userId, null]);
+      } = await client.query<MvpAccountSummary>(summarySql(), [userId, null]);
       await client.query(
         `INSERT INTO idempotency_keys (id, user_id, idempotency_key, request_hash, response)
          VALUES ($1, $2, $3, $4, $5::jsonb)`,

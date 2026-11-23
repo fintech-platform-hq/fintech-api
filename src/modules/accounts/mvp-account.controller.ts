@@ -8,6 +8,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -34,6 +35,16 @@ export class MvpAccountController {
     @Param('accountId', ParseUUIDPipe) accountId: string,
   ) {
     return this.accounts.read(request.principal.userId, accountId);
+  }
+
+  @Get('account/:accountId/history')
+  @Header('Cache-Control', 'no-store')
+  history(
+    @Req() request: AuthenticatedRequest,
+    @Param('accountId', ParseUUIDPipe) accountId: string,
+    @Query('cursor') cursor?: string,
+  ) {
+    return this.accounts.history(request.principal.userId, accountId, cursor);
   }
 
   @Post('account-previews')

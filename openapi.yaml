@@ -25,7 +25,7 @@ paths:
           $ref: '#/components/responses/MvpUnavailable'
     post:
       summary: Confirm opening a new personal BRL account with its opening balance
-      description: An explicit accountId requests legacy adoption, which is blocked in I1-A. An identical confirmed request replays its original result.
+      description: An explicit accountId requests legacy adoption, which remains blocked. An identical confirmed request replays its original result.
       operationId: openMvpAccount
       security:
         - bearerAuth: []
@@ -86,6 +86,78 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MvpOpening'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/MvpConflict'
+        '503':
+          $ref: '#/components/responses/MvpUnavailable'
+  /mvp/account/{accountId}/history:
+    get:
+      summary: Read an owned account, balance and a page of confirmed movements
+      description: The summary and page use the same snapshot. The cursor preserves the cut and snapshot version. Reload the first page on STALE_REVISION. Movements are ordered by occurredAt descending and then by ID descending.
+      operationId: getMvpHistory
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: cursor
+          schema: { type: string, maxLength: 600 }
+      responses:
+        '200':
+          description: First or subsequent page with up to 50 movements.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MvpHistoryPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/MvpConflict'
+        '503':
+          $ref: '#/components/responses/MvpUnavailable'
+  /mvp/transactions:
+    post:
+      summary: Register an income or expense in the active personal account
+      description: An identical confirmation replays the original receipt before checking the live revision. New movements require BRL, a confirmed base, and an occurrence from the coverage start through server time, inclusive.
+      operationId: registerMvpTransaction
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MvpTransactionRequest'
+      responses:
+        '201':
+          description: Canonical receipt persisted with the movement and the new revision.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/MvpMovement'
+                  - type: object
+                    required: [revision]
+                    properties:
+                      revision: { type: string, pattern: '^[1-9][0-9]*$' }
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -370,7 +442,7 @@ components:
         accountId:
           type: string
           format: uuid
-          description: Explicit legacy adoption target. Adoption is blocked in I1-A.
+          description: Explicit legacy adoption target. Adoption remains blocked.
     MvpAccountSummary:
       type: object
       required: [principalId, account, legacyAccounts, status, base, balanceMinor, revision, asOf]
@@ -402,6 +474,51 @@ components:
           type: [string, 'null']
           description: Monotonic decimal revision, present for the active MVP account.
         asOf: { type: string, format: date-time }
+    MvpTransactionRequest:
+      type: object
+      additionalProperties: false
+      required: [accountId, type, amountMinor, currency, occurredAt, clientMutationId, expectedRevision]
+      properties:
+        accountId: { type: string, format: uuid }
+        type: { type: string, enum: [income, expense] }
+        amountMinor: { type: integer, minimum: 1, maximum: 999999999 }
+        currency: { type: string, const: BRL }
+        description: { type: [string, 'null'], maxLength: 255 }
+        occurredAt:
+          type: string
+          format: date-time
+          description: Precise timestamp with offset and up to six fractional digits.
+        clientMutationId: { type: string, format: uuid }
+        expectedRevision: { type: string, pattern: '^[1-9][0-9]{0,18}$' }
+    MvpMovement:
+      type: object
+      required: [id, accountId, type, amountMinor, currency, description, occurredAt, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        type: { type: string, enum: [income, expense] }
+        amountMinor: { type: string, pattern: '^[1-9][0-9]*$' }
+        currency: { type: string, const: BRL }
+        description: { type: [string, 'null'] }
+        occurredAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+    MvpHistoryPage:
+      type: object
+      required: [summary, entries, nextCursor]
+      properties:
+        summary:
+          $ref: '#/components/schemas/MvpAccountSummary'
+        entries:
+          type: array
+          maxItems: 50
+          items:
+            allOf:
+              - $ref: '#/components/schemas/MvpMovement'
+              - type: object
+                required: [coverage]
+                properties:
+                  coverage: { type: string, enum: [covered, before_base, after_cut, no_base] }
+        nextCursor: { type: [string, 'null'] }
     Credentials:
       type: object
       additionalProperties: false
@@ -608,7 +725,7 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
     MvpConflict:
-      description: Incompatible idempotency key, existing active account, or blocked legacy adoption.
+      description: Incompatible idempotency key, existing active account, blocked legacy adoption, missing base, or a stale revision.
       content:
         application/json:
           schema:
@@ -617,7 +734,7 @@ components:
             properties:
               statusCode: { const: 409 }
               code:
-                enum: [IDEMPOTENCY_CONFLICT, MVP_ACCOUNT_EXISTS, LEGACY_ADOPTION_BLOCKED]
+                enum: [IDEMPOTENCY_CONFLICT, MVP_ACCOUNT_EXISTS, LEGACY_ADOPTION_BLOCKED, BASE_REQUIRED, STALE_REVISION]
               message: { type: string }
     AuthTokens:
       description: Access token and a new opaque refresh token.
