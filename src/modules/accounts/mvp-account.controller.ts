@@ -22,6 +22,8 @@ import {
   MvpCheckQuery,
 } from './mvp-check.dto';
 import { MvpOpeningDto } from './mvp-opening.dto';
+import { MvpRecoveryInput, MvpRecoveryConfirmation } from './mvp-recovery.dto';
+import { MvpRecoveryService } from './mvp-recovery.service';
 
 @Controller('mvp')
 @UseGuards(AuthGuard)
@@ -29,7 +31,28 @@ export class MvpAccountController {
   constructor(
     private readonly accounts: MvpAccountService,
     private readonly checks: MvpCheckService,
+    private readonly recoveries: MvpRecoveryService,
   ) {}
+
+  @Post('recovery-previews')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  previewRecovery(
+    @Req() request: AuthenticatedRequest,
+    @Body() dto: MvpRecoveryInput,
+  ) {
+    return this.recoveries.preview(request.principal.userId, dto);
+  }
+
+  @Post('recoveries')
+  @Header('Cache-Control', 'no-store')
+  confirmRecovery(
+    @Req() request: AuthenticatedRequest,
+    @Headers('idempotency-key') key: string,
+    @Body() dto: MvpRecoveryConfirmation,
+  ) {
+    return this.recoveries.confirm(request.principal.userId, key, dto);
+  }
 
   @Post('check-previews')
   @HttpCode(200)

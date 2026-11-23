@@ -65,6 +65,8 @@ export const summarySql = (cut = 'statement_timestamp()') => `
 `;
 
 type HistoryEntry = Omit<MvpTransactionReceipt, 'revision'> & {
+  occurrenceDay: string | null;
+  occurrenceZone: string | null;
   coverage: 'covered' | 'before_base' | 'after_cut' | 'no_base';
 };
 
@@ -91,13 +93,14 @@ const historySql = `
     SELECT jsonb_agg(to_jsonb(page) ORDER BY page."occurredAt" DESC, page.id DESC) AS items
     FROM (
       SELECT t.id, t.account_id AS "accountId", t.type, t.amount_minor::text AS "amountMinor",
-        t.currency, t.description,
+        t.currency, t.description, t.occurrence_day::text AS "occurrenceDay",
+        t.occurrence_zone AS "occurrenceZone",
         to_char(t.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt",
         to_char(t.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt",
         CASE
           WHEN s.base IS NULL THEN 'no_base'
           WHEN t.occurred_at < (s.base->>'coverageStart')::timestamptz THEN 'before_base'
-          WHEN t.occurred_at > s."asOf"::timestamptz THEN 'after_cut'
+          WHEN COALESCE(t.latest_occurrence_at, t.occurred_at) > s."asOf"::timestamptz THEN 'after_cut'
           ELSE 'covered'
         END AS coverage
       FROM transactions t

@@ -61,7 +61,11 @@ describeWithDatabase('I2 balance checks (HTTP and PostgreSQL)', () => {
     await pool?.end();
   });
 
-  async function open(baseMinor = '90000') {
+  async function open(
+    baseMinor = '90000',
+    coverageStart = baseAt,
+    referenceZone = 'America/Sao_Paulo',
+  ) {
     const auth = await http()
       .post('/auth/register')
       .set('X-Forwarded-For', `192.0.2.${++fixtureIP}`)
@@ -77,8 +81,8 @@ describeWithDatabase('I2 balance checks (HTTP and PostgreSQL)', () => {
       .set('Idempotency-Key', randomUUID())
       .send({
         baseMinor,
-        coverageStart: baseAt,
-        referenceZone: 'America/Sao_Paulo',
+        coverageStart,
+        referenceZone,
       })
       .expect(201);
     const { account, principalId } = response.body as {
@@ -509,5 +513,551 @@ describeWithDatabase('I2 balance checks (HTTP and PostgreSQL)', () => {
       .expect(({ body }) =>
         expect(body).toMatchObject({ code: 'STALE_REVISION' }),
       );
+  });
+  async function recoveryFixture() {
+    const a = await open('90000', '2026-11-14T12:00:00Z');
+    await a.move('1', 5500, '2026-11-14T12:00:00Z').expect(201);
+    const referenceAt = '2026-11-18T12:00:00Z';
+    const check = await a
+      .confirm('2', randomUUID(), { referenceAt })
+      .expect(201);
+    await a.move('3', 1800, '2026-11-18T12:10:00Z').expect(201);
+    const input = {
+      accountId: a.id,
+      checkId: (check.body as { id: string }).id,
+      amountMinor: '2500',
+      day: '2026-11-15',
+      occurredAt: '2026-11-15T15:00:00Z',
+      description: 'Padaria',
+    };
+    const preview = (changes = {}) =>
+      http()
+        .post('/mvp/recovery-previews')
+        .set('Authorization', a.authorization)
+        .send({ ...input, ...changes });
+    const recover = (changes = {}, key = randomUUID()) =>
+      http()
+        .post('/mvp/recoveries')
+        .set('Authorization', a.authorization)
+        .set('Idempotency-Key', key)
+        .send({
+          ...input,
+          expectedRevision: '4',
+          evidence: 'Compra identificada no comprovante',
+          action: 'create',
+          ...changes,
+        });
+    const ledger = () =>
+      pool
+        .query<{
+          movements: number;
+          recoveries: number;
+          receipts: number;
+          revision: string;
+        }>(
+          `SELECT (SELECT count(*)::int FROM transactions WHERE account_id = $1) AS movements,
+          (SELECT count(*)::int FROM mvp_expense_recoveries WHERE account_id = $1) AS recoveries,
+          (SELECT count(*)::int FROM idempotency_keys WHERE response->>'accountId' = $1::uuid::text
+            AND response ? 'transactionId') AS receipts,
+          (SELECT revision::text FROM mvp_accounts WHERE account_id = $1) AS revision`,
+          [a.id],
+        )
+        .then(({ rows }) => rows[0]);
+    return { a, input, preview, recover, ledger };
+  }
+
+  it('S03 keeps the original and resolves only the identified R$25 and R$20 expenses', async () => {
+    const { a, input, preview, recover, ledger } = await recoveryFixture();
+    await a
+      .list()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { balanceMinor: '82700' },
+          entries: [
+            { remainingDifferenceMinor: '4500', resolutionStatus: 'open' },
+          ],
+        }),
+      );
+    await preview()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          revision: '4',
+          dateStatus: 'eligible',
+          candidates: [],
+        }),
+      );
+    const first = await recover().expect(201);
+    await a
+      .list()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { balanceMinor: '80200', revision: '5' },
+          entries: [
+            {
+              originalCalculatedMinor: '84500',
+              observedMinor: '80000',
+              originalDifferenceMinor: '4500',
+              calculatedAtReferenceMinor: '82000',
+              remainingDifferenceMinor: '2000',
+              resolutionStatus: 'partially_explained',
+            },
+          ],
+        }),
+      );
+    await recover({
+      expectedRevision: '5',
+      amountMinor: '2000',
+      day: '2026-11-16',
+      occurredAt: '2026-11-16T15:00:00Z',
+      description: 'Segunda despesa',
+    }).expect(201);
+    await a
+      .list()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { balanceMinor: '78200', revision: '6' },
+          entries: [
+            {
+              originalCalculatedMinor: '84500',
+              observedMinor: '80000',
+              originalDifferenceMinor: '4500',
+              remainingDifferenceMinor: '0',
+              calculatedAtReferenceMinor: '80000',
+              status: 'coincident',
+              resolutionStatus: 'resolved',
+            },
+          ],
+        }),
+      );
+    await a
+      .list({ view: 'pending' })
+      .expect(200)
+      .expect(({ body }) => expect(body).toMatchObject({ entries: [] }));
+    const audit = await pool.query<{
+      user_id: string;
+      transaction_id: string;
+      declaration: unknown;
+      evidence: string;
+    }>(
+      'SELECT user_id, transaction_id, declaration, evidence FROM mvp_expense_recoveries WHERE check_id = $1 ORDER BY mvp_revision',
+      [input.checkId],
+    );
+    expect(audit.rows[0]).toMatchObject({
+      user_id: a.principalId,
+      transaction_id: (first.body as { transactionId: string }).transactionId,
+      evidence: 'Compra identificada no comprovante',
+      declaration: {
+        amountMinor: '2500',
+        day: '2026-11-15',
+        occurredAt: '2026-11-15T15:00:00.000000Z',
+      },
+    });
+    expect(await ledger()).toEqual({
+      movements: 4,
+      recoveries: 2,
+      receipts: 2,
+      revision: '6',
+    });
+  });
+
+  it('assigns zero delta to a linked movement included in the original check', async () => {
+    const { a, recover, ledger } = await recoveryFixture();
+    const {
+      rows: [original],
+    } = await pool.query<{ id: string }>(
+      'SELECT id FROM transactions WHERE account_id = $1 AND amount_minor = 5500',
+      [a.id],
+    );
+    await recover({
+      action: 'link',
+      transactionId: original.id,
+      amountMinor: '5500',
+      day: '2026-11-14',
+      occurredAt: '2026-11-14T12:00:00Z',
+    }).expect(201);
+    await a
+      .list()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { balanceMinor: '82700' },
+          entries: [
+            { remainingDifferenceMinor: '4500', resolutionStatus: 'open' },
+          ],
+        }),
+      );
+    expect(await ledger()).toEqual({
+      movements: 2,
+      recoveries: 1,
+      receipts: 1,
+      revision: '5',
+    });
+  });
+
+  it('S04 preserves an inverted residue and distinguishes unlinked numeric coincidence', async () => {
+    const inverted = await recoveryFixture();
+    await inverted.recover({ amountMinor: '5000' }).expect(201);
+    await inverted.a
+      .list({ view: 'pending' })
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { balanceMinor: '77700' },
+          entries: [
+            { remainingDifferenceMinor: '-500', resolutionStatus: 'open' },
+          ],
+        }),
+      );
+    const coincident = await recoveryFixture();
+    await coincident.a.move('4', 4500, coincident.input.occurredAt).expect(201);
+    await coincident.a
+      .list()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          entries: [
+            {
+              remainingDifferenceMinor: '0',
+              resolutionStatus: 'coincident',
+              originalDifferenceMinor: '4500',
+            },
+          ],
+        }),
+      );
+  });
+
+  it('S05 preview and deferral have no effects; history link and distinct purchase require explicit confirmation', async () => {
+    const { a, input, preview, recover, ledger } = await recoveryFixture();
+    const same = await a.move('4', 2500, input.occurredAt).expect(201);
+    const sameID = (same.body as { id: string }).id;
+    const similar = await a.move('5', 2500, '2026-11-15T17:00:00Z').expect(201);
+    const similarID = (similar.body as { id: string }).id;
+    await preview()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          revision: '6',
+          candidates: [{ id: similarID }, { id: sameID }],
+        }),
+      );
+    expect(await ledger()).toEqual({
+      movements: 4,
+      recoveries: 0,
+      receipts: 0,
+      revision: '6',
+    });
+    await recover({ action: undefined, expectedRevision: '6' }).expect(400);
+    await recover({ action: 'link', expectedRevision: '6' }).expect(400);
+    await recover({
+      action: 'link',
+      transactionId: sameID,
+      expectedRevision: '6',
+      amountMinor: '2400',
+    }).expect(201);
+    await a
+      .list()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { balanceMinor: '77700', revision: '7' },
+          entries: [{ remainingDifferenceMinor: '-500' }],
+        }),
+      );
+    await recover({
+      action: 'link',
+      transactionId: sameID,
+      expectedRevision: '7',
+    })
+      .expect(409)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ code: 'MOVEMENT_ALREADY_LINKED' }),
+      );
+
+    const separate = await recoveryFixture();
+    await separate.a.move('4', 2500, separate.input.occurredAt).expect(201);
+    await separate
+      .preview()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          revision: '5',
+          candidates: [expect.objectContaining({ amountMinor: '2500' })],
+        }),
+      );
+    expect(await separate.ledger()).toEqual({
+      movements: 3,
+      recoveries: 0,
+      receipts: 0,
+      revision: '5',
+    });
+    await separate.recover({ expectedRevision: '5' }).expect(201);
+    await separate.a
+      .list()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { balanceMinor: '77700' },
+          entries: [{ remainingDifferenceMinor: '-500' }],
+        }),
+      );
+  });
+
+  it('S05/S07 serializes stable reference replays and rejects incompatible targets and stale unreferenced previews', async () => {
+    const { a, input, recover, ledger, preview } = await recoveryFixture();
+    const reference = {
+      externalSource: 'bank-a',
+      externalReference: 'genuine-reference-1',
+    };
+    await recover({ externalSource: 'bank-a' }).expect(400);
+    const key = randomUUID();
+    const [a1, a2, b1] = await Promise.all([
+      recover(reference, key).expect(201),
+      recover(reference, key).expect(201),
+      recover(reference).expect(201),
+    ]);
+    expect(a1.body).toEqual(a2.body);
+    expect(a1.body).toEqual(b1.body);
+    expect(await ledger()).toEqual({
+      movements: 3,
+      recoveries: 1,
+      receipts: 2,
+      revision: '5',
+    });
+    await preview(reference)
+      .expect(200)
+      .expect(({ body }) =>
+        expect(
+          (body as { existingRecovery: unknown }).existingRecovery,
+        ).toEqual(a1.body),
+      );
+    await recover({ ...reference, amountMinor: '2000' })
+      .expect(409)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ code: 'EXTERNAL_REFERENCE_CONFLICT' }),
+      );
+    await recover({ ...reference, amountMinor: '2000' }, key)
+      .expect(409)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' }),
+      );
+    await recover()
+      .expect(409)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ code: 'STALE_REVISION' }),
+      );
+    const other = await a.move('5', 2500, input.occurredAt).expect(201);
+    await recover({
+      ...reference,
+      action: 'link',
+      transactionId: (other.body as { id: string }).id,
+      expectedRevision: '6',
+    })
+      .expect(409)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ code: 'EXTERNAL_REFERENCE_CONFLICT' }),
+      );
+    await recover({
+      ...reference,
+      action: 'link',
+      transactionId: (a1.body as { transactionId: string }).transactionId,
+      expectedRevision: '6',
+    })
+      .expect(201)
+      .expect(({ body }) => expect(body).toEqual(a1.body));
+  });
+
+  it('allows one winner when clients race to use the same reference for incompatible expenses', async () => {
+    const { recover, ledger } = await recoveryFixture();
+    const reference = {
+      externalSource: 'bank-a',
+      externalReference: 'racing-provider-id',
+    };
+    const replies = await Promise.all([
+      recover(reference),
+      recover({ ...reference, amountMinor: '2600' }),
+    ]);
+    expect(replies.map(({ status }) => status).sort()).toEqual([201, 409]);
+    expect(replies.find(({ status }) => status === 409)?.body).toMatchObject({
+      code: 'EXTERNAL_REFERENCE_CONFLICT',
+    });
+    expect(await ledger()).toEqual({
+      movements: 3,
+      recoveries: 1,
+      receipts: 1,
+      revision: '5',
+    });
+  });
+
+  it('S09 rolls back before the recovery link, then serializes a retry against another confirmation', async () => {
+    const { recover, ledger, a } = await recoveryFixture();
+    const old = await ledger();
+    await pool.query(`CREATE FUNCTION i3_fail_link() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'injected link failure'; END $$;
+      CREATE TRIGGER i3_fail_link BEFORE INSERT ON mvp_expense_recoveries
+      FOR EACH ROW EXECUTE FUNCTION i3_fail_link();`);
+    const key = randomUUID();
+    try {
+      await recover({}, key).expect(503);
+      expect(await ledger()).toEqual(old);
+    } finally {
+      await pool.query(
+        'DROP TRIGGER i3_fail_link ON mvp_expense_recoveries; DROP FUNCTION i3_fail_link()',
+      );
+    }
+    const [first, concurrent] = await Promise.all([
+      recover({}, key),
+      a.confirm('4', randomUUID(), { referenceAt: '2026-11-19T12:00:00Z' }),
+    ]);
+    expect([first.status, concurrent.status].sort()).toEqual([201, 409]);
+    if (first.status === 201) {
+      await recover({}, key)
+        .expect(201)
+        .expect(({ body }) => expect(body).toEqual(first.body));
+    } else {
+      await recover({ expectedRevision: '5' }).expect(201);
+    }
+    expect((await ledger()).recoveries).toBe(1);
+  });
+
+  it('isolates candidates, selected transaction IDs, checks and external references between holders', async () => {
+    const a = await recoveryFixture();
+    const b = await recoveryFixture();
+    const reference = {
+      externalSource: 'bank-a',
+      externalReference: 'same-provider-id',
+    };
+    const first = await a.recover(reference).expect(201);
+    await b
+      .preview({ ...reference, accountId: a.a.id, checkId: a.input.checkId })
+      .expect(404);
+    await b.preview({ checkId: a.input.checkId }).expect(404);
+    await b
+      .recover({
+        action: 'link',
+        transactionId: (first.body as { transactionId: string }).transactionId,
+      })
+      .expect(404);
+    await b
+      .preview(reference)
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          candidates: [],
+          existingRecovery: null,
+        }),
+      );
+    await b.recover(reference).expect(201);
+    await http().post('/mvp/recovery-previews').send(a.input).expect(401);
+  });
+
+  it('S11 freezes day precision and rejects cuts whose inclusion depends on an unknown time', async () => {
+    const { a, preview, recover, ledger } = await recoveryFixture();
+    await preview({ day: '2026-11-14', occurredAt: null })
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ dateStatus: 'time_required' }),
+      );
+    await preview({ day: '2026-11-18', occurredAt: null })
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          dateStatus: 'time_required',
+          ambiguousCheckIds: [expect.any(String)],
+        }),
+      );
+    await recover({ day: '2026-11-18', occurredAt: null })
+      .expect(409)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ code: 'OCCURRENCE_TIME_REQUIRED' }),
+      );
+    await preview({ day: '2026-11-13', occurredAt: null })
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ dateStatus: 'outside_coverage' }),
+      );
+    await preview({
+      day: '2026-11-18',
+      occurredAt: '2026-11-18T12:00:00.000001Z',
+    })
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ dateStatus: 'after_check' }),
+      );
+    await preview({
+      day: '2026-11-18',
+      occurredAt: '2026-11-18T12:00:00.000000Z',
+    })
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ dateStatus: 'eligible' }),
+      );
+    const noTime = await recover({
+      occurredAt: null,
+      amountMinor: '1000',
+    }).expect(201);
+    const { transactionId } = noTime.body as { transactionId: string };
+    await http()
+      .get(`/mvp/account/${a.id}/history`)
+      .set('Authorization', a.authorization)
+      .expect(200)
+      .expect(({ body }) => {
+        const history = body as {
+          entries: {
+            id: string;
+            occurrenceDay?: string;
+            occurrenceZone?: string;
+          }[];
+        };
+        expect(
+          history.entries.find((entry) => entry.id === transactionId),
+        ).toMatchObject({
+          occurrenceDay: '2026-11-15',
+          occurrenceZone: 'America/Sao_Paulo',
+        });
+      });
+    const inDay = { referenceAt: '2026-11-15T15:00:00Z' };
+    await a
+      .preview(inDay)
+      .expect(409)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ code: 'OCCURRENCE_TIME_REQUIRED' }),
+      );
+    await a.confirm('5', randomUUID(), inDay).expect(409);
+    await a.preview({ referenceAt: '2026-11-16T02:59:59.999998Z' }).expect(409);
+    await a.preview({ referenceAt: '2026-11-16T02:59:59.999999Z' }).expect(200);
+    await a.preview({ referenceAt: '2026-11-15T02:59:59.999999Z' }).expect(200);
+    expect((await ledger()).revision).toBe('5');
+    await a
+      .list()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          entries: [
+            {
+              remainingDifferenceMinor: '3500',
+              resolutionStatus: 'partially_explained',
+            },
+          ],
+        }),
+      );
+  });
+
+  it('freezes civil days across 23-hour and 25-hour transitions and an offset change at midnight', async () => {
+    const { rows } = await pool.query<{ hours: number; start: string }>(
+      `SELECT extract(epoch FROM mvp_civil_day_start(day + 1, zone) - mvp_civil_day_start(day, zone))::int / 3600 AS hours,
+         to_char(mvp_civil_day_start(day, zone) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') AS start
+       FROM (VALUES ('2026-03-08'::date, 'America/New_York'), ('2026-11-01', 'America/New_York'),
+         ('2026-11-01', 'America/Havana'), ('2018-11-04', 'America/Sao_Paulo')) AS days(day, zone)`,
+    );
+    expect(rows).toEqual([
+      { hours: 23, start: '2026-03-08 05:00' },
+      { hours: 25, start: '2026-11-01 04:00' },
+      { hours: 25, start: '2026-11-01 04:00' },
+      { hours: 23, start: '2018-11-04 03:00' },
+    ]);
   });
 });

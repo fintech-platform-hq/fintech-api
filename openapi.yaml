@@ -131,6 +131,7 @@ paths:
   /mvp/check-previews:
     post:
       summary: Preview a dated balance check
+      description: A cut inside the possible occurrence interval of a date-only expense returns OCCURRENCE_TIME_REQUIRED. Choose an unambiguous cut.
       operationId: previewMvpBalanceCheck
       security:
         - bearerAuth: []
@@ -160,7 +161,7 @@ paths:
   /mvp/checks:
     post:
       summary: Confirm an immutable balance check
-      description: Advances the account revision atomically with the observation and receipt. Creates zero movements. Compatible replay returns the original receipt before validating the current revision.
+      description: Advances the account revision atomically with the observation and receipt. Creates zero movements. Compatible replay returns the original receipt before validating the current revision. A new cut inside a date-only interval returns OCCURRENCE_TIME_REQUIRED.
       operationId: confirmMvpBalanceCheck
       security:
         - bearerAuth: []
@@ -222,6 +223,69 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MvpChecksPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/MvpConflict'
+        '503':
+          $ref: '#/components/responses/MvpUnavailable'
+  /mvp/recovery-previews:
+    post:
+      summary: Review an expense against a balance check
+      description: Read-only evaluation against one account revision. Suggestions match confirmed expenses on civil day and exact amount. Description only affects ranking. The caller can select an eligible movement through the account history.
+      operationId: previewMvpExpenseRecovery
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MvpRecoveryInput'
+      responses:
+        '200':
+          description: Revision, exact projections, temporal eligibility and up to 50 candidates. No candidate is selected automatically.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MvpRecoveryPreview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/MvpUnavailable'
+  /mvp/recoveries:
+    post:
+      summary: Confirm a reviewed expense recovery
+      description: Explicitly link an existing expense without changing the balance, or create a distinct covered expense with its link. Confirmation records the evidence and advances the account revision once. Deferring is a client action with no write. A compatible idempotent or external-reference replay returns the original receipt.
+      operationId: confirmMvpExpenseRecovery
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MvpRecoveryConfirmation'
+      responses:
+        '201':
+          description: Canonical receipt for the recovery and its linked movement.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MvpRecoveryReceipt'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -622,6 +686,13 @@ components:
                 required: [coverage]
                 properties:
                   coverage: { type: string, enum: [covered, before_base, after_cut, no_base] }
+                  occurrenceDay:
+                    type: [string, 'null']
+                    format: date
+                    description: Display this civil day without a time when present. In this case occurredAt is the lower interval bound retained as the history ordering key.
+                  occurrenceZone:
+                    type: [string, 'null']
+                    description: IANA account zone frozen with a civil day.
         nextCursor: { type: [string, 'null'] }
     MvpCheckFields:
       type: object
@@ -698,10 +769,118 @@ components:
                   status:
                     type: string
                     enum: [open, coincident]
-                    description: Nonzero remaining difference is open. Zero is numeric coincidence at the cut.
+                    description: Backward-compatible state. Nonzero remaining difference is open. Zero is numerically coincident.
+                  resolutionStatus:
+                    type: string
+                    enum: [open, coincident, partially_explained, resolved]
+                    description: The resolved state requires traceable linked expense deltas that fully explain the original difference.
         nextAfter:
           type: [string, 'null']
           format: uuid
+    MvpRecoveryFields:
+      type: object
+      required: [accountId, checkId, amountMinor, day]
+      dependentRequired:
+        externalSource: [externalReference]
+        externalReference: [externalSource]
+      properties:
+        accountId: { type: string, format: uuid }
+        checkId: { type: string, format: uuid }
+        amountMinor: { type: string, pattern: '^[1-9][0-9]{0,8}$' }
+        day:
+          type: string
+          format: date
+          description: Expense civil day in the active account's IANA reference zone.
+        occurredAt:
+          type: [string, 'null']
+          format: date-time
+          description: Optional precise UTC instant ending in Z, with at most six fractional digits. Omit for day precision.
+        description: { type: string, maxLength: 240 }
+        externalSource:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9._-]{0,63}$'
+          description: External issuer namespace.
+        externalReference:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: A genuine, case-sensitive identifier supplied by the issuer. Unique within the account and issuer. Never derive it from the transaction attributes.
+    MvpRecoveryInput:
+      allOf:
+        - $ref: '#/components/schemas/MvpRecoveryFields'
+      unevaluatedProperties: false
+    MvpRecoveryConfirmation:
+      allOf:
+        - $ref: '#/components/schemas/MvpRecoveryFields'
+        - type: object
+          required: [expectedRevision, action, evidence]
+          properties:
+            expectedRevision: { type: string, pattern: '^[1-9][0-9]{0,18}$' }
+            action: { type: string, enum: [link, create] }
+            transactionId: { type: string, format: uuid }
+            evidence:
+              type: string
+              minLength: 1
+              maxLength: 1000
+              description: User's statement identifying the source of the evidence. Attachments are outside this contract.
+          if:
+            properties:
+              action: { const: link }
+          then:
+            required: [transactionId]
+          else:
+            not:
+              required: [transactionId]
+      unevaluatedProperties: false
+    MvpRecoveryPreview:
+      type: object
+      required: [checkId, accountId, revision, referenceZone, dateStatus, balanceMinor, remainingDifferenceMinor, projectedBalanceMinor, projectedRemainingDifferenceMinor, ambiguousCheckIds, candidates, existingRecovery]
+      properties:
+        checkId: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        revision: { type: string }
+        referenceZone: { type: string }
+        dateStatus:
+          type: string
+          enum: [eligible, time_required, outside_coverage, after_check]
+          description: Eligibility to create a distinct expense. Manual linking validates the selected existing expense separately.
+        balanceMinor: { type: string, pattern: '^(0|-?[1-9][0-9]*)$' }
+        remainingDifferenceMinor: { type: string, pattern: '^(0|-?[1-9][0-9]*)$' }
+        projectedBalanceMinor: { type: [string, 'null'], pattern: '^(0|-?[1-9][0-9]*)$' }
+        projectedRemainingDifferenceMinor: { type: [string, 'null'], pattern: '^(0|-?[1-9][0-9]*)$' }
+        ambiguousCheckIds:
+          type: array
+          items: { type: string, format: uuid }
+        candidates:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            required: [id, amountMinor, description, occurredAt, occurrenceDay, occurrenceZone, alreadyLinked]
+            properties:
+              id: { type: string, format: uuid }
+              amountMinor: { type: string, pattern: '^[1-9][0-9]{0,8}$' }
+              description: { type: [string, 'null'] }
+              occurredAt: { type: [string, 'null'], format: date-time }
+              occurrenceDay: { type: [string, 'null'], format: date }
+              occurrenceZone: { type: [string, 'null'] }
+              alreadyLinked: { type: boolean }
+        existingRecovery:
+          anyOf:
+            - $ref: '#/components/schemas/MvpRecoveryReceipt'
+            - type: 'null'
+    MvpRecoveryReceipt:
+      type: object
+      required: [id, accountId, checkId, authorId, action, transactionId, revision, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        checkId: { type: string, format: uuid }
+        authorId: { type: string, format: uuid }
+        action: { type: string, enum: [link, create] }
+        transactionId: { type: string, format: uuid }
+        revision: { type: string }
+        createdAt: { type: string, format: date-time }
     Credentials:
       type: object
       additionalProperties: false
@@ -908,7 +1087,7 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
     MvpConflict:
-      description: Incompatible idempotency key, existing active account, blocked legacy adoption, missing base, or a stale revision.
+      description: Idempotency, account revision, coverage precision, movement eligibility or external reference conflict.
       content:
         application/json:
           schema:
@@ -917,7 +1096,7 @@ components:
             properties:
               statusCode: { const: 409 }
               code:
-                enum: [IDEMPOTENCY_CONFLICT, MVP_ACCOUNT_EXISTS, LEGACY_ADOPTION_BLOCKED, BASE_REQUIRED, STALE_REVISION]
+                enum: [IDEMPOTENCY_CONFLICT, MVP_ACCOUNT_EXISTS, LEGACY_ADOPTION_BLOCKED, BASE_REQUIRED, STALE_REVISION, OCCURRENCE_TIME_REQUIRED, EXTERNAL_REFERENCE_CONFLICT, MOVEMENT_ALREADY_LINKED, MOVEMENT_INELIGIBLE]
               message: { type: string }
     AuthTokens:
       description: Access token and a new opaque refresh token.
