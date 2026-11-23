@@ -7,6 +7,20 @@ import { Pool } from 'pg';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
+import type { MvpAccountSummary } from '../src/modules/accounts/mvp-account.service';
+import type {
+  AuditReceipt,
+  MvpAuditService,
+} from '../src/modules/accounts/mvp-audit.service';
+import type {
+  MvpCheckEntry,
+  MvpCheckReceipt,
+} from '../src/modules/accounts/mvp-check.service';
+import type { RecoveryReceipt } from '../src/modules/accounts/mvp-recovery.service';
+import type { MvpTransactionReceipt } from '../src/modules/transactions/dto/mvp-transaction.dto';
+
+type AuditPreview = Awaited<ReturnType<MvpAuditService['preview']>>;
+type CheckPage = { summary: MvpAccountSummary; entries: MvpCheckEntry[] };
 
 const url = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = url ? describe : describe.skip;
@@ -152,6 +166,358 @@ describeWithDatabase('I2 balance checks (HTTP and PostgreSQL)', () => {
       revision: string;
     };
   }
+
+  function baseAudit(a: Awaited<ReturnType<typeof open>>) {
+    return {
+      input: (action: string, fields = {}) => ({
+        accountId: a.id,
+        targetId: a.id,
+        action,
+        reason: 'Fictitious base review',
+        ...fields,
+      }),
+      preview: (input: object) =>
+        http()
+          .post('/mvp/audit-previews')
+          .set('Authorization', a.authorization)
+          .send(input),
+      confirm: (
+        input: object,
+        preview: AuditPreview,
+        key = randomUUID(),
+        confirmed = true,
+      ) =>
+        http()
+          .post('/mvp/audited-changes')
+          .set('Authorization', a.authorization)
+          .set('Idempotency-Key', key)
+          .send({
+            ...input,
+            expectedRevision: preview.revision,
+            previewToken: preview.previewToken,
+            confirmed,
+          }),
+      versions: () =>
+        http()
+          .get(`/mvp/account/${a.id}/base-versions`)
+          .set('Authorization', a.authorization),
+      history: () =>
+        http()
+          .get(`/mvp/account/${a.id}/history`)
+          .set('Authorization', a.authorization),
+    };
+  }
+
+  it('I5 S10 suspends, corrects, replays and preserves original values and ownership', async () => {
+    const a = await open();
+    const b = await open();
+    const audit = baseAudit(a);
+    await a.move('1', 5500, baseAt).expect(201);
+    const original = (await a.confirm('2').expect(201)).body as MvpCheckReceipt;
+    await a.move('3', 1800, afterCheck).expect(201);
+
+    const suspend = audit.input('suspend_base');
+    const suspension = (await audit.preview(suspend).expect(200))
+      .body as AuditPreview;
+    expect(suspension).toMatchObject({
+      revision: '4',
+      balanceMinor: '82700',
+      projectedBalanceMinor: null,
+    });
+    await audit.confirm(suspend, suspension, randomUUID(), false).expect(400);
+    const suspensionKey = randomUUID();
+    const suspendedReceipt = (
+      await audit.confirm(suspend, suspension, suspensionKey).expect(201)
+    ).body as AuditReceipt;
+    await a
+      .preview()
+      .expect(409)
+      .expect(({ body }) =>
+        expect((body as { code: string }).code).toBe('BASE_SUSPENDED'),
+      );
+    await a
+      .move('5', 1, baseAt)
+      .expect(409)
+      .expect(({ body }) =>
+        expect((body as { code: string }).code).toBe('BASE_SUSPENDED'),
+      );
+    await a
+      .list()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: {
+            status: 'unavailable',
+            baseSuspended: true,
+            balanceMinor: null,
+          },
+          entries: [
+            {
+              originalCalculatedMinor: '84500',
+              originalDifferenceMinor: '4500',
+              remainingDifferenceMinor: null,
+              resolutionStatus: 'unavailable',
+            },
+          ],
+        }),
+      );
+    await a
+      .list({ view: 'pending' })
+      .expect(200)
+      .expect(({ body }) => expect((body as CheckPage).entries).toEqual([]));
+
+    const change = audit.input('correct_base', { baseMinor: '91000' });
+    const preview = (await audit.preview(change).expect(200))
+      .body as AuditPreview;
+    expect(preview).toMatchObject({
+      revision: '5',
+      balanceMinor: null,
+      projectedBalanceMinor: '83700',
+      previousCoverageStart: baseAt,
+      proposedCoverageStart: baseAt,
+      coverageChanges: [],
+      checks: [
+        {
+          id: original.id,
+          originalDifferenceMinor: '4500',
+          beforeMinor: null,
+          afterMinor: '5500',
+        },
+      ],
+    });
+    const foreign = baseAudit(b);
+    await foreign.preview(change).expect(404);
+    await foreign.confirm(change, preview).expect(404);
+    await http()
+      .get(`/mvp/account/${a.id}/base-versions`)
+      .set('Authorization', b.authorization)
+      .expect(404);
+    const key = randomUUID();
+    const [first, replay] = await Promise.all([
+      audit.confirm(change, preview, key).expect(201),
+      audit.confirm(change, preview, key).expect(201),
+    ]);
+    expect(replay.body).toEqual(first.body);
+    await audit
+      .confirm(suspend, suspension, suspensionKey)
+      .expect(201, suspendedReceipt);
+    await audit
+      .confirm({ ...change, baseMinor: '92000' }, preview, key)
+      .expect(409)
+      .expect(({ body }) =>
+        expect((body as { code: string }).code).toBe('IDEMPOTENCY_CONFLICT'),
+      );
+    await audit
+      .confirm(change, preview)
+      .expect(409)
+      .expect(({ body }) =>
+        expect((body as { code: string }).code).toBe('STALE_REVISION'),
+      );
+    await a
+      .list()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { revision: '6', balanceMinor: '83700' },
+          entries: [
+            {
+              ...original,
+              calculatedAtReferenceMinor: '85500',
+              remainingDifferenceMinor: '5500',
+            },
+          ],
+        }),
+      );
+    await audit
+      .versions()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject([
+          {
+            ...(first.body as AuditReceipt),
+            baseMinor: '91000',
+            authorId: a.principalId,
+          },
+          { ...suspendedReceipt, baseMinor: '90000' },
+          {
+            action: 'original',
+            revision: '1',
+            baseMinor: '90000',
+            reason: null,
+          },
+        ]),
+      );
+
+    for (const revision of ['6', '7', '8']) {
+      await a.move(revision, 1, afterCheck).expect(201);
+    }
+    const secondChange = audit.input('correct_base', { baseMinor: '92000' });
+    const secondPreview = (await audit.preview(secondChange).expect(200))
+      .body as AuditPreview;
+    await audit.confirm(secondChange, secondPreview).expect(201);
+    await audit
+      .versions()
+      .expect(200)
+      .expect(({ body }) => {
+        const versions = body as { revision: string }[];
+        expect(versions.map(({ revision }) => revision)).toEqual([
+          '10',
+          '6',
+          '5',
+          '1',
+        ]);
+      });
+  });
+
+  it('I5 requires a known instant when T0 crosses a day, then reclassifies coverage inclusively', async () => {
+    const a = await open();
+    const audit = baseAudit(a);
+    const first = (await a.move('1', 5500, baseAt).expect(201))
+      .body as MvpTransactionReceipt;
+    const old = (await a.confirm('2').expect(201)).body as MvpCheckReceipt;
+    const lateCut = '2026-01-04T12:00:00.000001Z';
+    const later = (
+      await a.confirm('3', randomUUID(), { referenceAt: lateCut }).expect(201)
+    ).body as MvpCheckReceipt;
+    const dateOnly = (
+      await http()
+        .post('/mvp/recoveries')
+        .set('Authorization', a.authorization)
+        .set('Idempotency-Key', randomUUID())
+        .send({
+          accountId: a.id,
+          checkId: later.id,
+          action: 'create',
+          expectedRevision: '4',
+          amountMinor: '1000',
+          day: '2026-01-03',
+          evidence: 'Fictitious receipt',
+        })
+        .expect(201)
+    ).body as RecoveryReceipt;
+    const newStart = '2026-01-03T12:00:00.000001Z';
+    const change = audit.input('correct_base', {
+      baseMinor: '84500',
+      coverageStart: newStart,
+    });
+    const suspended = audit.input('suspend_base');
+    const suspension = (await audit.preview(suspended).expect(200))
+      .body as AuditPreview;
+    await audit.confirm(suspended, suspension).expect(201);
+    const blocked = (await audit.preview(change).expect(200))
+      .body as AuditPreview;
+    expect(blocked).toMatchObject({
+      previewToken: null,
+      projectedBalanceMinor: null,
+      ambiguousMovementIds: [dateOnly.transactionId],
+      coverageChanges: [
+        { id: first.id, after: 'before_base' },
+        { id: dateOnly.transactionId, after: 'ambiguous' },
+      ],
+    });
+    const refinement = audit.input('refine_occurrence', {
+      targetId: dateOnly.transactionId,
+      occurredAt: newStart,
+    });
+    await audit.preview({ ...refinement, occurredAt: lateCut }).expect(400);
+    const reviewed = (await audit.preview(refinement).expect(200))
+      .body as AuditPreview;
+    await audit.confirm(refinement, reviewed).expect(201);
+    const preview = (await audit.preview(change).expect(200))
+      .body as AuditPreview;
+    expect(preview).toMatchObject({
+      projectedBalanceMinor: '83500',
+      ambiguousMovementIds: [],
+      coverageChanges: [{ id: first.id, after: 'before_base' }],
+    });
+    await audit.confirm(change, preview).expect(201);
+    await audit
+      .history()
+      .expect(200)
+      .expect(({ body }) =>
+        expect((body as CheckPage).entries).toMatchObject([
+          {
+            id: dateOnly.transactionId,
+            coverage: 'covered',
+            occurrenceDay: null,
+            occurredAt: newStart,
+          },
+          { id: first.id, coverage: 'before_base' },
+        ]),
+      );
+    const checks = ((await a.list().expect(200)).body as CheckPage).entries;
+    expect(checks).toMatchObject([
+      { id: later.id, remainingDifferenceMinor: '3500' },
+      {
+        id: old.id,
+        originalDifferenceMinor: '4500',
+        calculatedAtReferenceMinor: null,
+        remainingDifferenceMinor: null,
+        status: 'unavailable',
+        resolutionStatus: 'unavailable',
+      },
+    ]);
+  });
+
+  it('I5 rolls back a version when its receipt fails and serializes across check and base writers', async () => {
+    const a = await open();
+    const audit = baseAudit(a);
+    const change = audit.input('correct_base', {
+      baseMinor: '-9223372036854775808',
+    });
+    await a.move('1', 1, baseAt).expect(201);
+    const preview = (await audit.preview(change).expect(200))
+      .body as AuditPreview;
+    expect(preview.projectedBalanceMinor).toBe('-9223372036854775809');
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const key = randomUUID();
+      await client.query(
+        `INSERT INTO mvp_base_versions
+        (id,user_id,account_id,revision,action,base_minor,coverage_start,reason,write_key)
+        VALUES ($1,$2,$3,3,'correct_base',-1,$4,'Fictitious rollback',$5)`,
+        [randomUUID(), a.principalId, a.id, baseAt, key],
+      );
+      await client.query(
+        "INSERT INTO idempotency_keys (id,user_id,idempotency_key,request_hash,response) VALUES ($1,$2,$3,'fixture','{}')",
+        [randomUUID(), a.principalId, key],
+      );
+      await audit
+        .history()
+        .expect(200)
+        .expect(({ body }) =>
+          expect((body as CheckPage).summary).toMatchObject({
+            balanceMinor: '89999',
+            revision: '2',
+          }),
+        );
+      await expect(client.query('COMMIT')).rejects.toMatchObject({
+        code: '23514',
+      });
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+    await audit
+      .versions()
+      .expect(200)
+      .expect(({ body }) => expect(body).toHaveLength(1));
+    const concurrent = await Promise.all([
+      a.confirm('2'),
+      audit.confirm(change, preview),
+    ]);
+    expect(concurrent.map((result) => result.status).sort()).toEqual([
+      201, 409,
+    ]);
+    await audit
+      .history()
+      .expect(200)
+      .expect(({ body }) =>
+        expect((body as CheckPage).summary.revision).toBe('3'),
+      );
+  });
 
   it('preserves S02 originals, includes the exact cut and keeps prior checks independently', async () => {
     const a = await open();

@@ -22,6 +22,9 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
   let legacyReceipt: unknown;
   let legacyRows: unknown;
   const legacyKey = randomUUID();
+  const legacyCoffeeKey = randomUUID();
+  let legacyCoffee: Record<string, unknown>;
+  let legacyCoffeeReceipt: unknown;
   let fixtureIP = 0;
 
   beforeAll(async () => {
@@ -81,7 +84,17 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
       201,
     );
     legacyReceipt = posted.body;
+    legacyCoffee = {
+      ...legacyMove,
+      amountMinor: 1800,
+      occurredAt: '2026-11-18T12:00:00Z',
+      clientMutationId: randomUUID(),
+    };
+    legacyCoffeeReceipt = (
+      await postMove(legacyAuth, legacyCoffeeKey, legacyCoffee).expect(201)
+    ).body;
     legacyRows = await readLegacyRows();
+    expect(legacyRows).toHaveLength(2);
     await pool.query(
       readFileSync('migrations/20261123_add_mvp_account_base.sql', 'utf8'),
     );
@@ -102,26 +115,22 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
 
   async function seedAndUpgradeI3() {
     const auth = await register();
-    const { account, principalId } = (
-      await open(auth, randomUUID(), {
-        ...opening,
-        baseMinor: '90000',
-      }).expect(201)
-    ).body as { account: { id: string }; principalId: string };
+    const accountResponse = await http()
+      .post('/accounts')
+      .set('Authorization', auth)
+      .send({ name: 'Conta pessoal', currency: 'BRL' })
+      .expect(201);
+    const account = accountResponse.body as { id: string };
+    const {
+      rows: [owner],
+    } = await pool.query<{ user_id: string }>(
+      'SELECT user_id FROM accounts WHERE id = $1',
+      [account.id],
+    );
+    const principalId = owner.user_id;
     const cut = '2026-11-18T12:00:00.000001Z';
-    const { id: checkId } = (
-      await http()
-        .post('/mvp/checks')
-        .set('Authorization', auth)
-        .set('Idempotency-Key', randomUUID())
-        .send({
-          accountId: account.id,
-          expectedRevision: '1',
-          observedMinor: '87500',
-          referenceAt: cut,
-        })
-        .expect(201)
-    ).body as { id: string };
+    const checkId = randomUUID();
+    const checkKey = randomUUID();
 
     // Seed a recovered expense against the I3 schema before creating the I4 view.
     const id = randomUUID();
@@ -129,6 +138,30 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
     const connection = await pool.connect();
     try {
       await connection.query('BEGIN');
+      // Write through the pre-I5 schema, then verify the live API after upgrading.
+      await connection.query(
+        'INSERT INTO mvp_accounts (user_id,account_id,base_minor,coverage_start,reference_zone) VALUES ($1,$2,90000,$3,$4)',
+        [principalId, account.id, opening.coverageStart, opening.referenceZone],
+      );
+      await connection.query(
+        `INSERT INTO mvp_balance_checks (id,user_id,account_id,observed_minor,reference_at,mvp_revision,mvp_write_key)
+         VALUES ($1,$2,$3,87500,$4,2,$5)`,
+        [checkId, principalId, account.id, cut, checkKey],
+      );
+      await connection.query(
+        'INSERT INTO idempotency_keys (id,user_id,idempotency_key,request_hash,response) VALUES ($1,$2,$3,$4,$5)',
+        [
+          randomUUID(),
+          principalId,
+          checkKey,
+          'fixture',
+          JSON.stringify({
+            id: checkId,
+            accountId: account.id,
+            revision: '2',
+          }),
+        ],
+      );
       await connection.query(
         `INSERT INTO transactions (id,user_id,account_id,type,amount_minor,currency,
           description,occurred_at,mvp_revision,mvp_write_key,mvp_recovery_id)
@@ -167,6 +200,28 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
     await pool.query(
       readFileSync('migrations/20261123_audit_mvp_corrections.sql', 'utf8'),
     );
+    await pool.query(
+      readFileSync(
+        'migrations/20261123_correct_mvp_opening_balance.sql',
+        'utf8',
+      ),
+    );
+    await http()
+      .get(`/mvp/account/${account.id}/base-versions`)
+      .set('Authorization', auth)
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject([
+          {
+            id: account.id,
+            authorId: principalId,
+            action: 'original',
+            revision: '1',
+            baseMinor: '90000',
+            coverageStart: opening.coverageStart,
+          },
+        ]),
+      );
     await http()
       .get(`/mvp/account/${account.id}/checks`)
       .set('Authorization', auth)
@@ -310,17 +365,20 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
        FROM transactions WHERE account_id = $1`,
       [legacyId],
     );
-    expect(precision).toEqual([
-      {
+    expect(precision).toEqual(
+      Array.from({ length: 2 }, () => ({
         occurrence_day: null,
         occurrence_zone: null,
         latest_occurrence_at: null,
         mvp_recovery_id: null,
-      },
-    ]);
+      })),
+    );
     await postMove(legacyAuth, legacyKey, legacyMove)
       .expect(201)
       .expect(({ body }) => expect(body).toEqual(legacyReceipt));
+    await postMove(legacyAuth, legacyCoffeeKey, legacyCoffee)
+      .expect(201)
+      .expect(({ body }) => expect(body).toEqual(legacyCoffeeReceipt));
     await http()
       .get('/mvp/account')
       .set('Authorization', legacyAuth)
@@ -344,7 +402,25 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
           revision: null,
         }),
       );
-    const adopt = { ...opening, baseMinor: '0', accountId: legacyId };
+    await http()
+      .get(`/mvp/account/${legacyId}/history`)
+      .set('Authorization', legacyAuth)
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { status: 'base_required', balanceMinor: null },
+          entries: [
+            { amountMinor: '1800', coverage: 'no_base' },
+            { amountMinor: '5500', coverage: 'no_base' },
+          ],
+        }),
+      );
+    const adopt = {
+      ...opening,
+      baseMinor: '84500',
+      coverageStart: '2026-11-18T11:00:00Z',
+      accountId: legacyId,
+    };
     await http()
       .post('/mvp/account-previews')
       .set('Authorization', legacyAuth)
@@ -469,9 +545,30 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
     const writer = await pool.connect();
     try {
       await writer.query('BEGIN');
+      const id = randomUUID();
+      const key = randomUUID();
+      const reason = 'Fictitious atomicity check';
       await writer.query(
-        'UPDATE mvp_accounts SET revision = 2, base_minor = base_minor + 1 WHERE user_id = $1',
-        [principalId],
+        `INSERT INTO mvp_base_versions (id,user_id,account_id,revision,action,base_minor,coverage_start,reason,write_key)
+         VALUES ($1,$2,$3,2,'correct_base',9007199254800001,$4,$5,$6)`,
+        [id, principalId, accountId, coverageStart, reason, key],
+      );
+      await writer.query(
+        'INSERT INTO idempotency_keys (id,user_id,idempotency_key,request_hash,response) VALUES ($1,$2,$3,$4,$5)',
+        [
+          randomUUID(),
+          principalId,
+          key,
+          'fixture',
+          JSON.stringify({
+            id,
+            accountId,
+            authorId: principalId,
+            action: 'correct_base',
+            reason,
+            revision: '2',
+          }),
+        ],
       );
       await expectBalance('9007199254794500', '1');
       await writer.query('COMMIT');
@@ -587,7 +684,10 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
             balanceMinor: null,
             revision: null,
           },
-          entries: [{ coverage: 'no_base', amountMinor: '5500' }],
+          entries: [
+            { coverage: 'no_base', amountMinor: '1800' },
+            { coverage: 'no_base', amountMinor: '5500' },
+          ],
         }),
       );
   });
@@ -774,9 +874,10 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
         'latest_occurrence_at', 'mvp_recovery_id'] AS movement, to_jsonb(i) AS receipt
       FROM accounts a
       JOIN transactions t ON t.user_id = a.user_id AND t.account_id = a.id
-      JOIN idempotency_keys i ON i.user_id = a.user_id AND i.idempotency_key = $2
-      WHERE a.id = $1`,
-      [legacyId, legacyKey],
+      JOIN idempotency_keys i ON i.user_id = a.user_id AND i.idempotency_key = ANY($2::uuid[])
+        AND i.response->>'id' = t.id::text
+      WHERE a.id = $1 ORDER BY t.occurred_at, t.id`,
+      [legacyId, [legacyKey, legacyCoffeeKey]],
     );
     return rows;
   }

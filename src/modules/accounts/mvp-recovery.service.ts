@@ -130,7 +130,8 @@ const previewSql = `
     WHERE r.user_id = m.user_id AND r.account_id = m.account_id
       AND r.external_source = $8 AND r.external_reference = $9
   ) existing ON true
-  WHERE m.user_id = $1 AND m.account_id = $2
+  WHERE m.user_id = $1 AND m.account_id = $2 AND NOT m.base_suspended
+    AND c.reference_at >= m.coverage_start
     AND NOT EXISTS (SELECT 1 FROM mvp_check_replacements x WHERE x.original_id = c.id)
 `;
 
