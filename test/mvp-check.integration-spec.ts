@@ -1060,4 +1060,420 @@ describeWithDatabase('I2 balance checks (HTTP and PostgreSQL)', () => {
       { hours: 23, start: '2018-11-04 03:00' },
     ]);
   });
+  async function auditedFixture() {
+    const { a, recover, input } = await recoveryFixture();
+    const bakery = (await recover().expect(201)).body as {
+      transactionId: string;
+    };
+    const other = (
+      await recover({
+        amountMinor: '2000',
+        day: '2026-11-16',
+        occurredAt: '2026-11-16T15:00:00Z',
+        expectedRevision: '5',
+      }).expect(201)
+    ).body as { transactionId: string };
+    const change = {
+      accountId: a.id,
+      targetId: bakery.transactionId,
+      action: 'correct',
+      amountMinor: '2400',
+      reason: 'Valor conferido no recibo',
+    };
+    const preview = (body: object) =>
+      http()
+        .post('/mvp/audit-previews')
+        .set('Authorization', a.authorization)
+        .send(body);
+    const review = async (body: object) => {
+      const result = await preview(body).expect(200);
+      const terms = result.body as { revision: string; previewToken: string };
+      return {
+        ...body,
+        expectedRevision: terms.revision,
+        previewToken: terms.previewToken,
+      };
+    };
+    const confirm = (body: object, key = randomUUID()) =>
+      http()
+        .post('/mvp/audited-changes')
+        .set('Authorization', a.authorization)
+        .set('Idempotency-Key', key)
+        .send(body);
+    const versions = (auth = a.authorization) =>
+      http()
+        .get(`/mvp/account/${a.id}/history/${bakery.transactionId}/versions`)
+        .set('Authorization', auth);
+    return {
+      a,
+      bakery,
+      other,
+      change,
+      preview,
+      review,
+      confirm,
+      versions,
+      checkId: input.checkId,
+    };
+  }
+
+  it('I4 S03/S09 serializes corrections and checks, preserves originals and replays the winner', async () => {
+    const { a, change, preview, review, confirm, versions, checkId } =
+      await auditedFixture();
+    await preview(change)
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          balanceMinor: '78200',
+          projectedBalanceMinor: '78300',
+          revision: '6',
+          checks: [
+            {
+              id: checkId,
+              originalDifferenceMinor: '4500',
+              beforeMinor: '0',
+              afterMinor: '100',
+            },
+          ],
+        }),
+      );
+    const winner = await review(change);
+    const loser = await review({ ...change, amountMinor: '2300' });
+    await confirm({ ...winner, previewToken: '0'.repeat(64) })
+      .expect(409)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ code: 'AUDIT_PREVIEW_REQUIRED' }),
+      );
+
+    const gate = await pool.connect();
+    const key = randomUUID();
+    await pool.query(`CREATE FUNCTION i4_wait_version() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.amount_minor = 2400 THEN PERFORM pg_advisory_xact_lock(94124); END IF; RETURN NEW; END $$;
+      CREATE TRIGGER i4_wait_version AFTER INSERT ON mvp_movement_versions
+      FOR EACH ROW EXECUTE FUNCTION i4_wait_version();`);
+    let result: object;
+    try {
+      await gate.query('SELECT pg_advisory_lock(94124)');
+      const first = confirm(winner, key)
+        .expect(201)
+        .then(({ body }) => body as object);
+      let waiting = false;
+      for (let attempt = 0; attempt < 100 && !waiting; attempt++) {
+        const { rowCount } = await pool.query(
+          "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND objid = 94124 AND NOT granted",
+        );
+        waiting = Boolean(rowCount);
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+      await a
+        .list()
+        .expect(200)
+        .expect(({ body }) =>
+          expect(body).toMatchObject({
+            summary: { revision: '6', balanceMinor: '78200' },
+            entries: [{ remainingDifferenceMinor: '0' }],
+          }),
+        );
+      const second = confirm(loser)
+        .expect(409)
+        .expect(({ body }) =>
+          expect(body).toMatchObject({ code: 'STALE_REVISION' }),
+        )
+        .then(() => undefined);
+      const anotherCheck = a
+        .confirm('6')
+        .expect(409)
+        .then(() => undefined);
+      await gate.query('SELECT pg_advisory_unlock(94124)');
+      [result] = await Promise.all([first, second, anotherCheck]);
+      expect(waiting).toBe(true);
+    } finally {
+      await gate.query('SELECT pg_advisory_unlock_all()');
+      gate.release();
+      await pool.query(
+        'DROP TRIGGER i4_wait_version ON mvp_movement_versions; DROP FUNCTION i4_wait_version()',
+      );
+    }
+    await confirm(winner, key)
+      .expect(201)
+      .expect(({ body }) => expect(body).toEqual(result));
+    await confirm(loser, key)
+      .expect(409)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' }),
+      );
+    await a
+      .list({ view: 'pending' })
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { revision: '7', balanceMinor: '78300' },
+          entries: [
+            {
+              id: checkId,
+              originalCalculatedMinor: '84500',
+              observedMinor: '80000',
+              originalDifferenceMinor: '4500',
+              remainingDifferenceMinor: '100',
+              resolutionStatus: 'partially_explained',
+            },
+          ],
+        }),
+      );
+    await versions()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject([
+          { action: 'original', amountMinor: '2500', description: 'Padaria' },
+          {
+            action: 'correct',
+            amountMinor: '2400',
+            authorId: a.principalId,
+            reason: change.reason,
+          },
+        ]),
+      );
+    const outsider = await open();
+    await versions(outsider.authorization).expect(404);
+    await http()
+      .post('/mvp/audit-previews')
+      .set('Authorization', outsider.authorization)
+      .send(change)
+      .expect(404);
+    await http()
+      .post('/mvp/audited-changes')
+      .set('Authorization', outsider.authorization)
+      .set('Idempotency-Key', key)
+      .send(winner)
+      .expect(404);
+  });
+
+  it.each([
+    ['invalidate', '80200', '2000'],
+    ['correct', '78200', '2500'],
+  ] as const)(
+    'I4 S04 %s recalculates the historical cut and link attribution',
+    async (action, balance, difference) => {
+      const { a, other, bakery, checkId, review, confirm } =
+        await auditedFixture();
+      const targetId =
+        action === 'invalidate' ? other.transactionId : bakery.transactionId;
+      const terms = await review({
+        accountId: a.id,
+        targetId,
+        action,
+        reason: 'Conferência do comprovante',
+        ...(action === 'correct'
+          ? { occurredAt: '2026-11-18T12:10:00.123456Z' }
+          : {}),
+      });
+      await confirm(terms).expect(201);
+      await a
+        .list()
+        .expect(200)
+        .expect(({ body }) =>
+          expect(body).toMatchObject({
+            summary: { balanceMinor: balance },
+            entries: [
+              {
+                id: checkId,
+                originalDifferenceMinor: '4500',
+                remainingDifferenceMinor: difference,
+              },
+            ],
+          }),
+        );
+      await http()
+        .get(`/mvp/account/${a.id}/history`)
+        .set('Authorization', a.authorization)
+        .expect(200)
+        .expect(({ body }) =>
+          expect(body).toMatchObject({
+            entries: expect.arrayContaining([
+              expect.objectContaining({
+                id: targetId,
+                auditAction: action,
+                ...(action === 'correct'
+                  ? { occurredAt: '2026-11-18T12:10:00.123456Z' }
+                  : {}),
+              }),
+            ]) as object,
+          }),
+        );
+    },
+  );
+
+  it('I4 keeps the exact inclusive cut and retains each edited description and occurrence', async () => {
+    const { a, change, review, confirm, versions, checkId } =
+      await auditedFixture();
+    const exactCut = '2026-11-18T12:00:00.000000Z';
+    const justAfterCut = '2026-11-18T12:00:00.000001Z';
+    await confirm(
+      await review({ ...change, occurredAt: exactCut, description: '' }),
+    ).expect(201);
+    await a
+      .list()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          entries: [{ id: checkId, remainingDifferenceMinor: '100' }],
+        }),
+      );
+    await confirm(
+      await review({
+        ...change,
+        occurredAt: justAfterCut,
+        description: 'Nota revisada',
+      }),
+    ).expect(201);
+    await a
+      .list()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { balanceMinor: '78300' },
+          entries: [{ id: checkId, remainingDifferenceMinor: '2500' }],
+        }),
+      );
+    await versions()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject([
+          { action: 'original', description: 'Padaria', amountMinor: '2500' },
+          {
+            action: 'correct',
+            description: null,
+            occurredAt: exactCut,
+            amountMinor: '2400',
+          },
+          {
+            action: 'correct',
+            description: 'Nota revisada',
+            occurredAt: justAfterCut,
+            amountMinor: '2400',
+          },
+        ]),
+      );
+  });
+
+  it('I4 S03 supersedes only the selected observation and preserves its audit and exact cut', async () => {
+    const { a, change, review, confirm, checkId } = await auditedFixture();
+    await confirm(await review(change)).expect(201);
+    const referenceAt = '2026-11-18T14:00:00.000001Z';
+    const previous = (
+      await a
+        .confirm('7', randomUUID(), { observedMinor: '78300', referenceAt })
+        .expect(201)
+    ).body as { id: string };
+    const terms = await review({
+      accountId: a.id,
+      targetId: previous.id,
+      action: 'replace_check',
+      reason: 'Erro de digitação',
+      referenceAt,
+      observedMinor: '78200',
+    });
+    const key = randomUUID();
+    const created = (await confirm(terms, key).expect(201)).body as {
+      id: string;
+    };
+    expect(created).toMatchObject({
+      replacesCheckId: previous.id,
+      authorId: a.principalId,
+      reason: 'Erro de digitação',
+      referenceAt,
+      originalDifferenceMinor: '100',
+    });
+    await confirm(terms, key)
+      .expect(201)
+      .expect(({ body }) => expect(body).toEqual(created));
+    await a
+      .list()
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          entries: [
+            {
+              id: created.id,
+              replacesCheckId: previous.id,
+              remainingDifferenceMinor: '100',
+            },
+            {
+              id: previous.id,
+              observedMinor: '78300',
+              originalDifferenceMinor: '0',
+              supersededBy: created.id,
+            },
+            { id: checkId, remainingDifferenceMinor: '100' },
+          ],
+        }),
+      );
+    await a
+      .list({ view: 'pending' })
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          entries: [{ id: created.id }, { id: checkId }],
+        }),
+      );
+    const second = await review({
+      accountId: a.id,
+      targetId: created.id,
+      action: 'replace_check',
+      reason: 'Nova conferência da digitação',
+      referenceAt,
+      observedMinor: '78300',
+    });
+    await confirm(second).expect(201);
+    await a
+      .list({ view: 'pending' })
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ entries: [{ id: checkId }] }),
+      );
+  });
+
+  it('I4 rolls back revision, audit and receipt together for movement and observation failures', async () => {
+    const { a, change, review, confirm, versions, checkId } =
+      await auditedFixture();
+    const movement = await review(change);
+    const observation = await review({
+      accountId: a.id,
+      targetId: checkId,
+      action: 'replace_check',
+      reason: 'Erro de digitação',
+      referenceAt: '2026-11-18T12:00:00Z',
+      observedMinor: '80100',
+    });
+    await pool.query(`CREATE FUNCTION i4_fail_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.response->>'action' IN ('correct', 'replace_check') THEN
+        RAISE EXCEPTION 'injected receipt failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER i4_fail_receipt BEFORE INSERT ON idempotency_keys
+      FOR EACH ROW EXECUTE FUNCTION i4_fail_receipt();`);
+    const keys = [randomUUID(), randomUUID()];
+    const before = await counts(a.id);
+    try {
+      await confirm(movement, keys[0]).expect(503);
+      await confirm(observation, keys[1]).expect(503);
+      expect(await counts(a.id)).toEqual(before);
+      await versions()
+        .expect(200)
+        .expect(({ body }) => expect(body).toHaveLength(1));
+      const { rows } = await pool.query(
+        'SELECT 1 FROM idempotency_keys WHERE idempotency_key = ANY($1::uuid[])',
+        [keys],
+      );
+      expect(rows).toEqual([]);
+      const links = await pool.query(
+        'SELECT 1 FROM mvp_check_replacements WHERE account_id = $1',
+        [a.id],
+      );
+      expect(links.rowCount).toBe(0);
+    } finally {
+      await pool.query(
+        'DROP TRIGGER i4_fail_receipt ON idempotency_keys; DROP FUNCTION i4_fail_receipt()',
+      );
+    }
+    await confirm(movement, keys[0]).expect(201);
+  });
 });

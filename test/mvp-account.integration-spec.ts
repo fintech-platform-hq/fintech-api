@@ -97,7 +97,104 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
     await pool.query(
       readFileSync('migrations/20261123_recover_mvp_expenses.sql', 'utf8'),
     );
+    await seedAndUpgradeI3();
   });
+
+  async function seedAndUpgradeI3() {
+    const auth = await register();
+    const { account, principalId } = (
+      await open(auth, randomUUID(), {
+        ...opening,
+        baseMinor: '90000',
+      }).expect(201)
+    ).body as { account: { id: string }; principalId: string };
+    const cut = '2026-11-18T12:00:00.000001Z';
+    const { id: checkId } = (
+      await http()
+        .post('/mvp/checks')
+        .set('Authorization', auth)
+        .set('Idempotency-Key', randomUUID())
+        .send({
+          accountId: account.id,
+          expectedRevision: '1',
+          observedMinor: '87500',
+          referenceAt: cut,
+        })
+        .expect(201)
+    ).body as { id: string };
+
+    // Seed a recovered expense against the I3 schema before creating the I4 view.
+    const id = randomUUID();
+    const key = randomUUID();
+    const connection = await pool.connect();
+    try {
+      await connection.query('BEGIN');
+      await connection.query(
+        `INSERT INTO transactions (id,user_id,account_id,type,amount_minor,currency,
+          description,occurred_at,mvp_revision,mvp_write_key,mvp_recovery_id)
+          VALUES ($1,$2,$3,'expense',2500,'BRL','Padaria anterior',$4,3,$5,$1)`,
+        [id, principalId, account.id, cut, key],
+      );
+      await connection.query(
+        `INSERT INTO mvp_expense_recoveries (id,user_id,account_id,transaction_id,check_id,action,
+          declaration,evidence,mvp_revision,mvp_write_key) VALUES ($1,$2,$3,$1,$4,'create','{}','Comprovante',3,$5)`,
+        [id, principalId, account.id, checkId, key],
+      );
+      await connection.query(
+        'INSERT INTO idempotency_keys (id,user_id,idempotency_key,request_hash,response) VALUES ($1,$2,$3,$4,$5)',
+        [
+          randomUUID(),
+          principalId,
+          key,
+          'fixture',
+          JSON.stringify({
+            id,
+            accountId: account.id,
+            checkId,
+            transactionId: id,
+            revision: '3',
+            action: 'create',
+          }),
+        ],
+      );
+      await connection.query('COMMIT');
+    } catch (error) {
+      await connection.query('ROLLBACK');
+      throw error;
+    } finally {
+      connection.release();
+    }
+    await pool.query(
+      readFileSync('migrations/20261123_audit_mvp_corrections.sql', 'utf8'),
+    );
+    await http()
+      .get(`/mvp/account/${account.id}/checks`)
+      .set('Authorization', auth)
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { balanceMinor: '87500', revision: '3' },
+          entries: [
+            {
+              id: checkId,
+              originalCalculatedMinor: '90000',
+              originalDifferenceMinor: '2500',
+              remainingDifferenceMinor: '0',
+              resolutionStatus: 'resolved',
+            },
+          ],
+        }),
+      );
+    await http()
+      .get(`/mvp/account/${account.id}/history/${id}/versions`)
+      .set('Authorization', auth)
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject([
+          { id, action: 'original', occurredAt: cut, amountMinor: '2500' },
+        ]),
+      );
+  }
 
   afterAll(async () => {
     await app?.close();

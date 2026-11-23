@@ -115,9 +115,9 @@ const previewSql = `
           lower(regexp_replace($7::text, '\\s+', ' ', 'g')), false) AS description_match,
         EXISTS (SELECT 1 FROM mvp_expense_recoveries r
           WHERE r.check_id = c.id AND r.transaction_id = t.id) AS "alreadyLinked"
-      FROM transactions t
+      FROM mvp_effective_movements t
       WHERE t.user_id = m.user_id AND t.account_id = m.account_id AND t.type = 'expense'
-        AND t.amount_minor = $4 AND t.occurred_at < day.next
+        AND NOT t.invalidated AND t.amount_minor = $4 AND t.occurred_at < day.next
         AND COALESCE(t.latest_occurrence_at, t.occurred_at) >= day.start
         AND t.occurred_at >= m.coverage_start AND COALESCE(t.latest_occurrence_at, t.occurred_at) <= c.reference_at
       ORDER BY description_match DESC, sort_at DESC, t.id DESC
@@ -131,6 +131,7 @@ const previewSql = `
       AND r.external_source = $8 AND r.external_reference = $9
   ) existing ON true
   WHERE m.user_id = $1 AND m.account_id = $2
+    AND NOT EXISTS (SELECT 1 FROM mvp_check_replacements x WHERE x.original_id = c.id)
 `;
 
 @Injectable()

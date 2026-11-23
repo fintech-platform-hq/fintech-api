@@ -31,9 +31,12 @@ export interface MvpCheckEntry extends MvpCheckReceipt {
   remainingDifferenceMinor: string;
   status: 'open' | 'coincident';
   resolutionStatus: 'open' | 'coincident' | 'partially_explained' | 'resolved';
+  supersededBy: string | null;
+  replacesCheckId: string | null;
+  replacementReason: string | null;
 }
 
-const receiptFields = `
+export const receiptFields = `
   id, account_id AS "accountId", user_id AS "authorId",
   observed_minor::text AS "observedMinor", mvp_revision::text AS revision,
   to_char(reference_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "referenceAt",
@@ -58,7 +61,11 @@ const checksSql = `
         (cut.balance - c.observed_minor)::text AS "remainingDifferenceMinor",
         CASE WHEN cut.balance = c.observed_minor THEN 'coincident' ELSE 'open' END AS status,
         mvp_recovery_status(c.original_difference_minor, cut.balance - c.observed_minor,
-          mvp_recovery_delta(c.id, c.mvp_revision)) AS "resolutionStatus"
+          mvp_recovery_delta(c.id, c.mvp_revision)) AS "resolutionStatus",
+        (SELECT x.replacement_id FROM mvp_check_replacements x WHERE x.original_id = c.id) AS "supersededBy",
+        (SELECT x.original_id FROM mvp_check_replacements x WHERE x.replacement_id = c.id) AS "replacesCheckId",
+        (SELECT x.reason FROM mvp_check_replacements x WHERE x.replacement_id = c.id OR x.original_id = c.id
+          ORDER BY (x.original_id = c.id) DESC LIMIT 1) AS "replacementReason"
       FROM mvp_balance_checks c
       CROSS JOIN LATERAL (
         SELECT mvp_balance_at(c.user_id, c.account_id, (s.base->>'baseMinor')::bigint,
@@ -66,7 +73,8 @@ const checksSql = `
       ) cut
       WHERE c.user_id = $1 AND c.account_id = $2 AND s.revision IS NOT NULL
         AND ($4::text IS NULL OR s.revision = $4)
-        AND (NOT $5::boolean OR cut.balance <> c.observed_minor)
+        AND (NOT $5::boolean OR (cut.balance <> c.observed_minor AND NOT EXISTS
+          (SELECT 1 FROM mvp_check_replacements x WHERE x.original_id = c.id)))
         AND ($3::uuid IS NULL OR (c.reference_at, c.created_at, c.id) <
           (SELECT reference_at, created_at, id FROM anchor))
       ORDER BY c.reference_at DESC, c.created_at DESC, c.id DESC

@@ -27,7 +27,7 @@ import { AuthService } from './auth.service';
     AppleTokenService,
     AppleRefreshTokenCipherService,
   ],
-  exports: [AuthGuard, AuthService],
+  exports: [AuthConfig, AuthGuard, AuthService],
 })
 export class AuthModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {

@@ -207,6 +207,7 @@ paths:
           schema: { type: string, format: uuid }
         - name: view
           in: query
+          description: Only current observations with a nonzero residual appear in pending.
           schema: { type: string, enum: [all, pending], default: all }
         - name: after
           in: query
@@ -233,6 +234,93 @@ paths:
           $ref: '#/components/responses/MvpConflict'
         '503':
           $ref: '#/components/responses/MvpUnavailable'
+  /mvp/audit-previews:
+    post:
+      summary: Preview a movement correction, invalidation or check replacement
+      operationId: previewMvpAuditedChange
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf: [{ $ref: '#/components/schemas/MvpAuditFields' }]
+              unevaluatedProperties: false
+      responses:
+        '200':
+          description: Read-only projection at one revision with a token bound to the holder and reviewed terms.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MvpAuditPreview' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/MvpConflict' }
+        '503': { $ref: '#/components/responses/MvpUnavailable' }
+  /mvp/audited-changes:
+    post:
+      summary: Confirm an audited change
+      description: Confirms reviewed terms at the expected revision. Matching replays return the original receipt before current-revision and token checks.
+      operationId: confirmMvpAuditedChange
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/MvpAuditFields'
+                - type: object
+                  required: [expectedRevision, previewToken]
+                  properties:
+                    expectedRevision:
+                      { type: string, pattern: '^[1-9][0-9]{0,18}$' }
+                    previewToken: { type: string, pattern: '^[0-9a-f]{64}$' }
+              unevaluatedProperties: false
+      responses:
+        '201':
+          description: Canonical audited receipt. A replacement also includes the immutable observation fields.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MvpAuditReceipt' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/MvpConflict' }
+        '503': { $ref: '#/components/responses/MvpUnavailable' }
+  /mvp/account/{accountId}/history/{movementId}/versions:
+    get:
+      summary: List the original and audited versions of a movement
+      operationId: listMvpMovementVersions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: movementId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The original followed by subsequent audited versions in confirmation order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MvpMovementVersion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/MvpUnavailable' }
   /mvp/recovery-previews:
     post:
       summary: Review an expense against a balance check
@@ -693,6 +781,10 @@ components:
                   occurrenceZone:
                     type: [string, 'null']
                     description: IANA account zone frozen with a civil day.
+                  auditAction:
+                    type: [string, 'null']
+                    enum: [correct, invalidate, null]
+                    description: Latest audit action. Invalidation keeps the entry visible and removes its monetary contribution.
         nextCursor: { type: [string, 'null'] }
     MvpCheckFields:
       type: object
@@ -774,9 +866,113 @@ components:
                     type: string
                     enum: [open, coincident, partially_explained, resolved]
                     description: The resolved state requires traceable linked expense deltas that fully explain the original difference.
+                  supersededBy: { type: [string, 'null'], format: uuid }
+                  replacesCheckId: { type: [string, 'null'], format: uuid }
+                  replacementReason: { type: [string, 'null'] }
         nextAfter:
           type: [string, 'null']
           format: uuid
+    MvpAuditFields:
+      type: object
+      required: [accountId, targetId, action, reason]
+      description: 'Use the movement ID for correct or invalidate, and the observation ID for replace_check. Correct requires at least one changed field. Invalidate only takes the common fields. Replacement requires observedMinor and referenceAt.'
+      properties:
+        accountId: { type: string, format: uuid }
+        targetId: { type: string, format: uuid }
+        action: { type: string, enum: [correct, invalidate, replace_check] }
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+        amountMinor: { type: string, pattern: '^[1-9][0-9]{0,8}$' }
+        description:
+          type: string
+          maxLength: 240
+          description: Empty clears the description. Omit to keep the current description.
+        occurredAt:
+          type: string
+          format: date-time
+          description: Precise UTC instant. Omit to preserve existing occurrence precision.
+        observedMinor: { type: string, pattern: '^(0|-?[1-9][0-9]{0,18})$' }
+        referenceAt: { type: string, format: date-time }
+    MvpAuditPreview:
+      type: object
+      required:
+        [
+          accountId,
+          targetId,
+          revision,
+          balanceMinor,
+          projectedBalanceMinor,
+          checks,
+          previewToken,
+        ]
+      properties:
+        accountId: { type: string, format: uuid }
+        targetId: { type: string, format: uuid }
+        revision: { type: string }
+        balanceMinor: { type: string }
+        projectedBalanceMinor: { type: string }
+        previewToken: { type: string, pattern: '^[0-9a-f]{64}$' }
+        checks:
+          type: array
+          items:
+            type: object
+            required:
+              [
+                id,
+                referenceAt,
+                originalDifferenceMinor,
+                beforeMinor,
+                afterMinor,
+              ]
+            properties:
+              id: { type: string, format: uuid }
+              referenceAt: { type: string, format: date-time }
+              originalDifferenceMinor: { type: string }
+              beforeMinor: { type: string }
+              afterMinor: { type: string }
+    MvpAuditReceipt:
+      type: object
+      required: [id, accountId, authorId, revision, createdAt, action, reason]
+      properties:
+        id: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        authorId: { type: string, format: uuid }
+        revision: { type: string }
+        createdAt: { type: string, format: date-time }
+        action: { type: string, enum: [correct, invalidate, replace_check] }
+        reason: { type: string }
+        transactionId: { type: string, format: uuid }
+        replacesCheckId: { type: string, format: uuid }
+        observedMinor: { type: string }
+        referenceAt: { type: string, format: date-time }
+        baseConfirmedAt: { type: string, format: date-time }
+        originalCalculatedMinor: { type: string }
+        originalDifferenceMinor: { type: string }
+    MvpMovementVersion:
+      type: object
+      required:
+        [
+          id,
+          action,
+          authorId,
+          reason,
+          amountMinor,
+          description,
+          occurrenceDay,
+          occurredAt,
+          createdAt,
+          revision,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        action: { type: string, enum: [original, correct, invalidate] }
+        authorId: { type: string, format: uuid }
+        reason: { type: [string, 'null'] }
+        amountMinor: { type: string }
+        description: { type: [string, 'null'] }
+        occurrenceDay: { type: [string, 'null'], format: date }
+        occurredAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        revision: { type: [string, 'null'] }
     MvpRecoveryFields:
       type: object
       required: [accountId, checkId, amountMinor, day]
@@ -1096,7 +1292,7 @@ components:
             properties:
               statusCode: { const: 409 }
               code:
-                enum: [IDEMPOTENCY_CONFLICT, MVP_ACCOUNT_EXISTS, LEGACY_ADOPTION_BLOCKED, BASE_REQUIRED, STALE_REVISION, OCCURRENCE_TIME_REQUIRED, EXTERNAL_REFERENCE_CONFLICT, MOVEMENT_ALREADY_LINKED, MOVEMENT_INELIGIBLE]
+                enum: [IDEMPOTENCY_CONFLICT, MVP_ACCOUNT_EXISTS, LEGACY_ADOPTION_BLOCKED, BASE_REQUIRED, STALE_REVISION, OCCURRENCE_TIME_REQUIRED, EXTERNAL_REFERENCE_CONFLICT, MOVEMENT_ALREADY_LINKED, MOVEMENT_INELIGIBLE, AUDIT_PREVIEW_REQUIRED, AUDIT_TARGET_INACTIVE]
               message: { type: string }
     AuthTokens:
       description: Access token and a new opaque refresh token.
