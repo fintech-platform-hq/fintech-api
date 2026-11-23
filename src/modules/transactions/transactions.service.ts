@@ -4,10 +4,15 @@ import {
   HttpException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
 import { isUUID } from 'class-validator';
 import { DatabaseService } from '../../common/database/database.service';
+import {
+  MvpTransactionDto,
+  MvpTransactionReceipt,
+} from './dto/mvp-transaction.dto';
 import {
   CreateTransactionDto,
   TransactionType,
@@ -29,6 +34,145 @@ interface AccountRow {
 @Injectable()
 export class TransactionsService {
   constructor(private readonly db: DatabaseService) {}
+
+  async registerMvp(
+    dto: MvpTransactionDto,
+    key: string,
+    userId: string,
+  ): Promise<MvpTransactionReceipt> {
+    if (!isUUID(key)) {
+      throw new BadRequestException('Idempotency-Key must be a UUID');
+    }
+    const revision = BigInt(dto.expectedRevision);
+    if (revision >= (1n << 63n) - 1n) {
+      throw new BadRequestException('Invalid expected revision');
+    }
+    key = key.toLowerCase();
+    const accountId = dto.accountId.toLowerCase();
+    const hash = createHash('sha256')
+      .update(
+        JSON.stringify([
+          'mvp.transactions.register',
+          1,
+          userId,
+          accountId,
+          dto.expectedRevision,
+          dto.type,
+          dto.amountMinor,
+          dto.currency,
+          dto.description ?? null,
+          dto.occurredAt,
+          dto.clientMutationId.toLowerCase(),
+        ]),
+      )
+      .digest('hex');
+
+    const client = await this.db.getClient();
+    try {
+      await client.query('BEGIN');
+      await client.query("SET LOCAL lock_timeout = '3s'");
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `${userId}:${key}`,
+      ]);
+      const {
+        rows: [receipt],
+      } = await client.query<{
+        request_hash: string;
+        response: MvpTransactionReceipt;
+      }>(
+        'SELECT request_hash, response FROM idempotency_keys WHERE user_id = $1 AND idempotency_key = $2 FOR UPDATE',
+        [userId, key],
+      );
+      if (receipt) {
+        if (receipt.request_hash !== hash) {
+          throw new ConflictException({
+            statusCode: 409,
+            code: 'IDEMPOTENCY_CONFLICT',
+            message: 'Idempotency key already used for another request',
+          });
+        }
+        await client.query('COMMIT');
+        return receipt.response;
+      }
+
+      const { rowCount } = await client.query(
+        "SELECT 1 FROM accounts WHERE user_id = $1 AND id = $2 AND currency = 'BRL' FOR NO KEY UPDATE",
+        [userId, accountId],
+      );
+      if (!rowCount) throw new NotFoundException('Account not found');
+
+      // The trigger checks coverage and expected revision under lock, and advances
+      // the account revision. The deferred constraint requires this receipt at commit.
+      const {
+        rows: [response],
+      } = await client.query<MvpTransactionReceipt>(
+        `INSERT INTO transactions (id, user_id, account_id, type, amount_minor,
+            currency, description, occurred_at, mvp_write_key, mvp_revision)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING id, account_id AS "accountId", type, amount_minor::text AS "amountMinor",
+           currency, description, mvp_revision::text AS revision,
+           to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt",
+           to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt"`,
+        [
+          randomUUID(),
+          userId,
+          accountId,
+          dto.type,
+          dto.amountMinor,
+          dto.currency,
+          dto.description ?? null,
+          dto.occurredAt,
+          key,
+          (revision + 1n).toString(),
+        ],
+      );
+      await client.query(
+        `INSERT INTO idempotency_keys (id, user_id, idempotency_key, request_hash, response)
+         VALUES ($1, $2, $3, $4, $5::jsonb)`,
+        [randomUUID(), userId, key, hash, JSON.stringify(response)],
+      );
+      await client.query('COMMIT');
+      return response;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      const { code, constraint } = error as {
+        code?: string;
+        constraint?: string;
+      };
+      if (constraint === 'mvp_transaction_stale_revision') {
+        throw new ConflictException({
+          statusCode: 409,
+          code: 'STALE_REVISION',
+          message: 'Account revision changed',
+        });
+      }
+      if (constraint === 'mvp_transaction_base_required') {
+        throw new ConflictException({
+          statusCode: 409,
+          code: 'BASE_REQUIRED',
+          message: 'A confirmed base is required',
+        });
+      }
+      if (
+        constraint === 'mvp_transaction_coverage' ||
+        code === '22008' ||
+        code === '22007' ||
+        code === '22009'
+      ) {
+        throw new BadRequestException(
+          'Occurrence must be within the confirmed coverage and in the past or present',
+        );
+      }
+      if (code === '55P03') {
+        throw new ServiceUnavailableException(
+          'Registration temporarily unavailable',
+        );
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 
   async createTransaction(
     dto: CreateTransactionDto,

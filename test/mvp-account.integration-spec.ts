@@ -85,6 +85,12 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
     await pool.query(
       readFileSync('migrations/20261123_add_mvp_account_base.sql', 'utf8'),
     );
+    await pool.query(
+      readFileSync(
+        'migrations/20261123_enable_mvp_transaction_registration.sql',
+        'utf8',
+      ),
+    );
   });
 
   afterAll(async () => {
@@ -374,10 +380,281 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
     }
   });
 
+  it('registers at T0, rejects invalid dates and values, and reads an exact coherent history', async () => {
+    const auth = await register();
+    const other = await register();
+    const opened = await open(auth, randomUUID(), {
+      ...opening,
+      baseMinor: '90000',
+    }).expect(201);
+    const accountId = (opened.body as { account: { id: string } }).account.id;
+    const move = {
+      ...legacyMove,
+      accountId,
+      expectedRevision: '1',
+      description: 'Fictícia no corte',
+    };
+    const path = `/mvp/account/${accountId}/history`;
+    await http().get(path).expect(401);
+    await http().get(path).set('Authorization', other).expect(404);
+    await postMvp(other, randomUUID(), move).expect(404);
+    await postMvp(legacyAuth, randomUUID(), { ...move, accountId: legacyId })
+      .expect(409)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ code: 'BASE_REQUIRED' }),
+      );
+
+    for (const invalid of [
+      { occurredAt: '2026-01-01T12:00:00.000000Z' },
+      { occurredAt: '2099-01-01T12:00:00.000000Z' },
+      { occurredAt: '2026-01-01T12:00:00.0000001Z' },
+      { currency: 'USD' },
+      { amountMinor: 0 },
+      { amountMinor: 1.1 },
+      { amountMinor: 1_000_000_000 },
+    ]) {
+      await postMvp(auth, randomUUID(), { ...move, ...invalid }).expect(400);
+    }
+    await http()
+      .get(path)
+      .set('Authorization', auth)
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { balanceMinor: '90000', revision: '1' },
+          entries: [],
+        }),
+      );
+    const key = randomUUID();
+    const posted = await postMvp(auth, key, move).expect(201);
+    expect(posted.body).toMatchObject({
+      occurredAt: coverageStart,
+      amountMinor: '5500',
+      revision: '2',
+    });
+    await postMvp(auth, randomUUID(), {
+      ...move,
+      expectedRevision: '2',
+      type: 'income',
+      amountMinor: 2500,
+      clientMutationId: randomUUID(),
+    }).expect(201);
+    await postMvp(auth, key, move).expect(201, posted.body);
+    const first = await http().get(path).set('Authorization', auth).expect(200);
+    const second = await http()
+      .get(path)
+      .set('Authorization', auth)
+      .expect(200);
+    expect(first.body).toMatchObject({
+      summary: { balanceMinor: '87000', revision: '3' },
+      entries: [{ coverage: 'covered' }, { coverage: 'covered' }],
+    });
+    const entries = (first.body as { entries: Array<{ id: string }> }).entries;
+    expect(entries.map(({ id }) => id)).toEqual(
+      entries
+        .map(({ id }) => id)
+        .sort()
+        .reverse(),
+    );
+    expect(second.body).toMatchObject({
+      entries,
+      summary: { balanceMinor: '87000', revision: '3' },
+    });
+    await http()
+      .get(`/mvp/account/${legacyId}/history`)
+      .set('Authorization', legacyAuth)
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: {
+            status: 'base_required',
+            balanceMinor: null,
+            revision: null,
+          },
+          entries: [{ coverage: 'no_base', amountMinor: '5500' }],
+        }),
+      );
+  });
+
+  it('serializes same-key replay and rejects an obsolete revision under contention', async () => {
+    const auth = await register();
+    const opened = await open(auth, randomUUID(), {
+      ...opening,
+      baseMinor: '0',
+    }).expect(201);
+    const accountId = (opened.body as { account: { id: string } }).account.id;
+    const move = { ...legacyMove, accountId, expectedRevision: '1' };
+    const key = randomUUID();
+    const [a, replay, competitor] = await Promise.all([
+      postMvp(auth, key, move),
+      postMvp(auth, key.toUpperCase(), move),
+      postMvp(auth, randomUUID(), { ...move, clientMutationId: randomUUID() }),
+    ]);
+    expect([a.status, competitor.status].sort()).toEqual([201, 409]);
+    expect(replay.status).toBe(a.status);
+    expect(replay.body).toEqual(a.body);
+    expect((a.status === 409 ? a : competitor).body).toMatchObject({
+      code: 'STALE_REVISION',
+    });
+    const winningKey = randomUUID();
+    const next = { ...move, expectedRevision: '2' };
+    await postMvp(auth, winningKey, next).expect(201);
+    await postMvp(auth, winningKey, { ...next, description: 'Mudança' })
+      .expect(409)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' }),
+      );
+    await postMove(auth, winningKey, { ...legacyMove, accountId }).expect(409);
+    await http()
+      .get(`/mvp/account/${accountId}/history`)
+      .set('Authorization', auth)
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { revision: '3', balanceMinor: '-11000' },
+          entries: [{}, {}],
+        }),
+      );
+  });
+
+  it('rolls back the movement and revision if creating the receipt fails', async () => {
+    const auth = await register();
+    const opened = await open(auth, randomUUID(), {
+      ...opening,
+      baseMinor: '90000',
+    }).expect(201);
+    const {
+      account: { id: accountId },
+      principalId,
+    } = opened.body as {
+      account: { id: string };
+      principalId: string;
+    };
+    const move = { ...legacyMove, accountId, expectedRevision: '1' };
+    const key = randomUUID();
+    // A marked direct insert is insufficient: COMMIT requires its matching receipt.
+    await expect(
+      pool.query(
+        `INSERT INTO transactions (id,user_id,account_id,type,amount_minor,currency,occurred_at,mvp_write_key,mvp_revision)
+       VALUES ($1,$2,$3,'expense',5500,'BRL',$4,$5,2)`,
+        [randomUUID(), principalId, accountId, coverageStart, key],
+      ),
+    ).rejects.toThrow(
+      /requires its own receipt|violates foreign key constraint/,
+    );
+    await pool.query(`
+      CREATE FUNCTION test_fail_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'injected receipt failure'; END; $$;
+      CREATE TRIGGER test_fail_receipt BEFORE INSERT ON idempotency_keys
+      FOR EACH ROW WHEN (NEW.response ? 'occurredAt') EXECUTE FUNCTION test_fail_receipt();
+    `);
+    try {
+      await postMvp(auth, key, move).expect(503);
+    } finally {
+      await pool.query(
+        'DROP TRIGGER test_fail_receipt ON idempotency_keys; DROP FUNCTION test_fail_receipt()',
+      );
+    }
+    await http()
+      .get(`/mvp/account/${accountId}/history`)
+      .set('Authorization', auth)
+      .expect(200)
+      .expect(({ body }) =>
+        expect(body).toMatchObject({
+          summary: { balanceMinor: '90000', revision: '1' },
+          entries: [],
+        }),
+      );
+    expect(
+      (
+        await pool.query(
+          'SELECT 1 FROM idempotency_keys WHERE idempotency_key = $1',
+          [key],
+        )
+      ).rowCount,
+    ).toBe(0);
+    const retry = await postMvp(auth, key, move).expect(201);
+    await postMvp(auth, key, move).expect(201, retry.body);
+  });
+
+  it.each([true, false])(
+    'pages tied timestamps and invalidates a changed snapshot (MVP active: %s)',
+    async (active) => {
+      const auth = await register();
+      const identity = await http()
+        .get('/mvp/account')
+        .set('Authorization', auth)
+        .expect(200);
+      const { principalId } = identity.body as { principalId: string };
+      const accountId = randomUUID();
+      const client = await pool.connect();
+      try {
+        // Use the legacy SQL fixture to test pagination over earlier data.
+        await client.query('BEGIN');
+        await client.query(
+          "INSERT INTO accounts (id,user_id,name,currency) VALUES ($1,$2,'Fictícia','BRL')",
+          [accountId, principalId],
+        );
+        await client.query(
+          `
+        INSERT INTO transactions (id,user_id,account_id,type,amount_minor,currency,occurred_at)
+        SELECT gen_random_uuid(),$1,$2,'expense',1,'BRL',$3 FROM generate_series(1,51)
+      `,
+          [principalId, accountId, coverageStart],
+        );
+        if (active) {
+          await client.query(
+            `INSERT INTO mvp_accounts (user_id,account_id,base_minor,coverage_start,reference_zone)
+           VALUES ($1,$2,90000,$3,$4)`,
+            [principalId, accountId, coverageStart, opening.referenceZone],
+          );
+        }
+        await client.query('COMMIT');
+      } finally {
+        client.release();
+      }
+      const getPage = () =>
+        http()
+          .get(`/mvp/account/${accountId}/history`)
+          .set('Authorization', auth);
+      type Page = {
+        summary: { asOf: string };
+        entries: Array<{ id: string }>;
+        nextCursor: string;
+      };
+      const first = (await getPage().expect(200)).body as Page;
+      expect(first.entries).toHaveLength(50);
+      const next = (
+        await getPage().query({ cursor: first.nextCursor }).expect(200)
+      ).body as Page;
+      expect(next.entries).toHaveLength(1);
+      expect(next.entries[0].id).not.toBe(first.entries[49].id);
+      expect(next.entries[0].id < first.entries[49].id).toBe(true);
+      expect(next.summary.asOf).toBe(first.summary.asOf);
+      if (active) {
+        await postMvp(auth, randomUUID(), {
+          ...legacyMove,
+          accountId,
+          expectedRevision: '1',
+        }).expect(201);
+      } else {
+        await postMove(auth, randomUUID(), { ...legacyMove, accountId }).expect(
+          201,
+        );
+      }
+      await getPage()
+        .query({ cursor: first.nextCursor })
+        .expect(409)
+        .expect(({ body }) =>
+          expect(body).toMatchObject({ code: 'STALE_REVISION' }),
+        );
+    },
+  );
+
   async function readLegacyRows() {
     const { rows } = await pool.query<Record<string, unknown>>(
       `
-      SELECT to_jsonb(a) AS account, to_jsonb(t) AS movement, to_jsonb(i) AS receipt
+      SELECT to_jsonb(a) AS account, to_jsonb(t) - 'mvp_write_key' - 'mvp_revision' AS movement, to_jsonb(i) AS receipt
       FROM accounts a
       JOIN transactions t ON t.user_id = a.user_id AND t.account_id = a.id
       JOIN idempotency_keys i ON i.user_id = a.user_id AND i.idempotency_key = $2
@@ -414,6 +691,14 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
   function postMove(auth: string, key: string, terms: Record<string, unknown>) {
     return http()
       .post('/transactions')
+      .set('Authorization', auth)
+      .set('Idempotency-Key', key)
+      .send(terms);
+  }
+
+  function postMvp(auth: string, key: string, terms: Record<string, unknown>) {
+    return http()
+      .post('/mvp/transactions')
       .set('Authorization', auth)
       .set('Idempotency-Key', key)
       .send(terms);
