@@ -91,6 +91,9 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
         'utf8',
       ),
     );
+    await pool.query(
+      readFileSync('migrations/20261123_record_mvp_balance_checks.sql', 'utf8'),
+    );
   });
 
   afterAll(async () => {

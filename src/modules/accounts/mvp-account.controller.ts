@@ -15,12 +15,51 @@ import {
 import { AuthGuard } from '../auth/auth.guard';
 import type { AuthenticatedRequest } from '../auth/auth.guard';
 import { MvpAccountService } from './mvp-account.service';
+import { MvpCheckService } from './mvp-check.service';
+import {
+  MvpCheckConfirmation,
+  MvpCheckInput,
+  MvpCheckQuery,
+} from './mvp-check.dto';
 import { MvpOpeningDto } from './mvp-opening.dto';
 
 @Controller('mvp')
 @UseGuards(AuthGuard)
 export class MvpAccountController {
-  constructor(private readonly accounts: MvpAccountService) {}
+  constructor(
+    private readonly accounts: MvpAccountService,
+    private readonly checks: MvpCheckService,
+  ) {}
+
+  @Post('check-previews')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  previewCheck(
+    @Req() request: AuthenticatedRequest,
+    @Body() dto: MvpCheckInput,
+  ) {
+    return this.checks.preview(request.principal.userId, dto);
+  }
+
+  @Post('checks')
+  @Header('Cache-Control', 'no-store')
+  confirmCheck(
+    @Req() request: AuthenticatedRequest,
+    @Headers('idempotency-key') key: string,
+    @Body() dto: MvpCheckConfirmation,
+  ) {
+    return this.checks.confirm(request.principal.userId, key, dto);
+  }
+
+  @Get('account/:accountId/checks')
+  @Header('Cache-Control', 'no-store')
+  listChecks(
+    @Req() request: AuthenticatedRequest,
+    @Param('accountId', ParseUUIDPipe) accountId: string,
+    @Query() query: MvpCheckQuery,
+  ) {
+    return this.checks.list(request.principal.userId, accountId, query);
+  }
 
   @Get('account')
   @Header('Cache-Control', 'no-store')
