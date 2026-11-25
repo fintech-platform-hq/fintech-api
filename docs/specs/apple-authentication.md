@@ -149,7 +149,7 @@ this value and the signed `auth_method` claim.
 
 Apple refresh tokens are encrypted at rest with AES-256-GCM. The versioned
 envelope is `v1.<iv>.<ciphertext>.<tag>` using unpadded Base64URL fields, a
-random 96-bit IV, and AAD bound to the `auth_identities.id`. Fintech refresh
+random 96-bit IV, and AAD bound to the `auth_identities.id`. Lenver refresh
 tokens remain opaque to clients and hash-only in the database.
 
 ## On-demand provider validation
@@ -158,18 +158,18 @@ tokens remain opaque to clients and hash-only in the database.
 at least 24 hours old (or absent), using the encrypted provider refresh token and Apple's token endpoint
 with `grant_type=refresh_token`. Password sessions never contact Apple. A
 successful validation updates `last_provider_validation_at`; a temporary Apple
-failure returns `503` without rotating the Fintech refresh token or changing
+failure returns `503` without rotating the Lenver refresh token or changing
 identity state. An `invalid_grant` response marks the identity revoked and
-revokes only its linked Apple refresh sessions. A Fintech access JWT already
+revokes only its linked Apple refresh sessions. A Lenver access JWT already
 issued can remain valid until its current 15-minute TTL. Apple
 server-to-server notifications remain outside this checkpoint.
 
 PostgreSQL is the clock for the validation window. Only success updates
 `last_provider_validation_at`, using `clock_timestamp()` after provider validation;
-the update and Fintech rotation commit together. An unsuccessful database
+the update and Lenver rotation commit together. An unsuccessful database
 transaction rolls back the timestamp as well. A previously issued access JWT is
 not blacklisted when the identity is revoked. Interactive Apple sign-in or linking
-can reactivate the identity, but never restores revoked Fintech refresh sessions.
+can reactivate the identity, but never restores revoked Lenver refresh sessions.
 
 Temporary failures have a 60-second process-local backoff keyed by identity ID
 and the SHA-256 fingerprint of the ciphertext. It stores only keys and deadlines;
