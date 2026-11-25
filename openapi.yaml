@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: Fintech API
+  title: Lenver API
   version: 0.0.1
   description: Public contract for authenticated accounts, personal balances and transaction creation.
 servers:
