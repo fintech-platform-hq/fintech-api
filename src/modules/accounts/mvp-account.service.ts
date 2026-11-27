@@ -1,4 +1,9 @@
 import {
+  authorizeFinancialWrite,
+  commitFinancialWrite,
+} from '../auth/session-authority';
+import type { AuthPrincipal } from '../auth/auth.types';
+import {
   BadRequestException,
   ConflictException,
   HttpException,
@@ -229,6 +234,7 @@ export class MvpAccountService {
     userId: string,
     key: string,
     dto: MvpOpeningDto,
+    principal?: AuthPrincipal,
   ): Promise<MvpAccountSummary> {
     if (!isUUID(key)) {
       throw new BadRequestException('Idempotency-Key must be a UUID');
@@ -242,6 +248,7 @@ export class MvpAccountService {
     try {
       await client.query('BEGIN');
       await client.query("SET LOCAL lock_timeout = '3s'");
+      await authorizeFinancialWrite(client, userId, principal);
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         `${userId}:${key}`,
       ]);
@@ -261,7 +268,7 @@ export class MvpAccountService {
             'Idempotency key already used for another request',
           );
         }
-        await client.query('COMMIT');
+        await commitFinancialWrite(client, principal);
         return receipt.response;
       }
 
@@ -279,9 +286,6 @@ export class MvpAccountService {
         );
       }
 
-      await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [
-        userId,
-      ]);
       const active = await client.query(
         'SELECT 1 FROM mvp_accounts WHERE user_id = $1',
         [userId],
@@ -323,7 +327,7 @@ export class MvpAccountService {
          VALUES ($1, $2, $3, $4, $5::jsonb)`,
         [randomUUID(), userId, key, hash, JSON.stringify(summary)],
       );
-      await client.query('COMMIT');
+      await commitFinancialWrite(client, principal);
       return summary;
     } catch (error) {
       await client.query('ROLLBACK');

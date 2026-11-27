@@ -45,12 +45,20 @@ describe('Application contract (e2e)', () => {
         });
       }
 
+      if (sql.includes('FROM refresh_sessions s')) {
+        return Promise.resolve({ rows: [{ financialAccess: true }] });
+      }
+
       if (sql.startsWith('SELECT currency')) {
         return Promise.resolve({ rows: [{ currency: 'BRL' }] });
       }
 
       if (sql.startsWith('SELECT 1')) {
         return Promise.resolve({ rows: [{ exists: 1 }] });
+      }
+
+      if (sql.startsWith('SELECT version FROM lenver_schema_version')) {
+        return Promise.resolve({ rows: [{ version: '20261127_v1_method_receipts' }] });
       }
 
       if (sql.startsWith('INSERT INTO transactions')) {
@@ -88,6 +96,12 @@ describe('Application contract (e2e)', () => {
   );
   const release = jest.fn();
   const getClient = jest.fn().mockResolvedValue({ query, release });
+  const queryWithTimeout = jest.fn(
+    (text: string, timeoutMilliseconds: number) => {
+      expect(timeoutMilliseconds).toBe(1_500);
+      return query(text);
+    },
+  );
   let app: INestApplication<App>;
 
   beforeAll(async () => {
@@ -98,13 +112,18 @@ describe('Application contract (e2e)', () => {
       imports: [AppModule],
     })
       .overrideProvider(DatabaseService)
-      .useValue({ getClient })
+      .useValue({ getClient, query, queryWithTimeout })
       .overrideGuard(AuthGuard)
       .useValue({
         canActivate: (context: {
           switchToHttp: () => { getRequest: () => Record<string, unknown> };
         }) => {
-          context.switchToHttp().getRequest().principal = { userId };
+          context.switchToHttp().getRequest().principal = {
+            userId,
+            authMethod: 'password',
+            familyId: userId,
+            expiresAt: Date.now() + 900_000,
+          };
           return true;
         },
       })
@@ -128,13 +147,14 @@ describe('Application contract (e2e)', () => {
   beforeEach(() => {
     idempotencyResults.clear();
     query.mockClear();
+    queryWithTimeout.mockClear();
     release.mockClear();
     getClient.mockClear();
   });
 
   it('returns the service status', async () => {
     await request(app.getHttpServer()).get('/').expect(200).expect({
-      name: 'fintech-api',
+      name: 'lenver-api',
       status: 'running',
     });
   });
@@ -149,6 +169,21 @@ describe('Application contract (e2e)', () => {
     expect(response.headers['x-request-id']).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
+  });
+
+  it('reports readiness only when the database schema matches', async () => {
+    await request(app.getHttpServer())
+      .get('/ready')
+      .expect(200)
+      .expect({ status: 'ready' });
+
+    queryWithTimeout.mockImplementationOnce(() =>
+      Promise.resolve({ rows: [] }),
+    );
+    await request(app.getHttpServer())
+      .get('/ready')
+      .expect(503)
+      .expect({ status: 'not_ready' });
   });
 
   it('creates an income transaction and returns the identical replay', async () => {

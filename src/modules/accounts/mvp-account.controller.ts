@@ -55,7 +55,12 @@ export class MvpAccountController {
     @Headers('idempotency-key') key: string,
     @Body() dto: MvpAuditConfirmation,
   ) {
-    return this.audit.confirm(request.principal.userId, key, dto);
+    return this.audit.confirm(
+      request.principal.userId,
+      key,
+      dto,
+      request.principal,
+    );
   }
 
   @Get('account/:accountId/base-versions')
@@ -94,7 +99,12 @@ export class MvpAccountController {
     @Headers('idempotency-key') key: string,
     @Body() dto: MvpRecoveryConfirmation,
   ) {
-    return this.recoveries.confirm(request.principal.userId, key, dto);
+    return this.recoveries.confirm(
+      request.principal.userId,
+      key,
+      dto,
+      request.principal,
+    );
   }
 
   @Post('check-previews')
@@ -114,7 +124,12 @@ export class MvpAccountController {
     @Headers('idempotency-key') key: string,
     @Body() dto: MvpCheckConfirmation,
   ) {
-    return this.checks.confirm(request.principal.userId, key, dto);
+    return this.checks.confirm(
+      request.principal.userId,
+      key,
+      dto,
+      request.principal,
+    );
   }
 
   @Get('account/:accountId/checks')
@@ -166,6 +181,11 @@ export class MvpAccountController {
     @Headers('idempotency-key') key: string,
     @Body() dto: MvpOpeningDto,
   ) {
-    return this.accounts.open(request.principal.userId, key, dto);
+    return this.accounts.open(
+      request.principal.userId,
+      key,
+      dto,
+      request.principal,
+    );
   }
 }

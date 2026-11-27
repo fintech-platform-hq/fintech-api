@@ -61,7 +61,15 @@ describe('TransactionsService', () => {
     release = jest.fn<void, []>();
     getClient = jest
       .fn<Promise<{ query: typeof query; release: typeof release }>, []>()
-      .mockResolvedValue({ query, release });
+      .mockResolvedValue({
+        query: (text: string, params?: unknown[]) =>
+          text.startsWith('SELECT id FROM users')
+            ? Promise.resolve({ rows: [{ id: userId }] })
+            : params
+              ? query(text, params)
+              : query(text),
+        release,
+      });
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -91,7 +99,9 @@ describe('TransactionsService', () => {
       service.createTransaction(dto, idempotencyKey, userId),
     ).resolves.toEqual(response);
 
-    const idempotencyInsertParameters = query.mock.calls[6][1];
+    const idempotencyInsertParameters = query.mock.calls.find(([sql]) =>
+      sql.includes('INSERT INTO idempotency_keys'),
+    )?.[1];
     if (typeof idempotencyInsertParameters?.[4] !== 'string') {
       throw new Error('Expected a serialized idempotency response');
     }
@@ -191,7 +201,9 @@ describe('TransactionsService', () => {
       .mockResolvedValueOnce({ rows: [] });
 
     await service.createTransaction(dto, idempotencyKey, userId);
-    const parameters = query.mock.calls[6][1];
+    const parameters = query.mock.calls.find(([sql]) =>
+      sql.includes('INSERT INTO idempotency_keys'),
+    )?.[1];
     if (typeof parameters?.[3] !== 'string') {
       throw new Error('Expected the request hash insert parameter');
     }

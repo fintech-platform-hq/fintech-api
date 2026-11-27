@@ -1,4 +1,9 @@
 import {
+  authorizeFinancialWrite,
+  commitFinancialWrite,
+} from '../auth/session-authority';
+import type { AuthPrincipal } from '../auth/auth.types';
+import {
   BadRequestException,
   ConflictException,
   HttpException,
@@ -39,6 +44,7 @@ export class TransactionsService {
     dto: MvpTransactionDto,
     key: string,
     userId: string,
+    principal?: AuthPrincipal,
   ): Promise<MvpTransactionReceipt> {
     if (!isUUID(key)) {
       throw new BadRequestException('Idempotency-Key must be a UUID');
@@ -71,6 +77,7 @@ export class TransactionsService {
     try {
       await client.query('BEGIN');
       await client.query("SET LOCAL lock_timeout = '3s'");
+      await authorizeFinancialWrite(client, userId, principal);
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         `${userId}:${key}`,
       ]);
@@ -91,7 +98,7 @@ export class TransactionsService {
             message: 'Idempotency key already used for another request',
           });
         }
-        await client.query('COMMIT');
+        await commitFinancialWrite(client, principal);
         return receipt.response;
       }
 
@@ -131,7 +138,7 @@ export class TransactionsService {
          VALUES ($1, $2, $3, $4, $5::jsonb)`,
         [randomUUID(), userId, key, hash, JSON.stringify(response)],
       );
-      await client.query('COMMIT');
+      await commitFinancialWrite(client, principal);
       return response;
     } catch (error) {
       await client.query('ROLLBACK');
@@ -185,6 +192,7 @@ export class TransactionsService {
     dto: CreateTransactionDto,
     idempotencyKey: string,
     userId: string,
+    principal?: AuthPrincipal,
   ): Promise<TransactionResponseDto> {
     if (!idempotencyKey) {
       throw new BadRequestException('Idempotency key required');
@@ -201,6 +209,7 @@ export class TransactionsService {
 
     try {
       await client.query('BEGIN');
+      await authorizeFinancialWrite(client, userId, principal);
 
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         `${userId}:${idempotencyKey.toLowerCase()}`,
@@ -228,7 +237,7 @@ export class TransactionsService {
           );
         }
 
-        await client.query('COMMIT');
+        await commitFinancialWrite(client, principal);
 
         return TransactionResponseDto.fromStoredResponse(
           existingIdempotencyKey.response,
@@ -323,7 +332,7 @@ export class TransactionsService {
         ],
       );
 
-      await client.query('COMMIT');
+      await commitFinancialWrite(client, principal);
 
       return response;
     } catch (error) {

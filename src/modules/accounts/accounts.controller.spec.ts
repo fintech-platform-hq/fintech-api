@@ -53,6 +53,6 @@ describe('AccountsController', () => {
         principal: { userId },
       } as AuthenticatedRequest),
     ).resolves.toEqual(response);
-    expect(createAccount).toHaveBeenCalledWith(dto, userId);
+    expect(createAccount).toHaveBeenCalledWith(dto, userId, { userId });
   });
 });

@@ -124,17 +124,26 @@ backoff, and concurrent callers continue to share an in-flight refresh.
 
 ## Environment variables
 
-Only secret-managed deployment configuration may provide these values:
+Set the native app environment and its exact, case-sensitive client ID as a pair:
 
 ```text
-APPLE_CLIENT_ID=<configured Apple client identifier>
+LENVER_APPLE_ENVIRONMENT=staging
+APPLE_CLIENT_ID=com.ferrari.lenver.staging
 APPLE_TEAM_ID=<Apple team identifier>
 APPLE_KEY_ID=<Sign in with Apple key identifier>
 APPLE_PRIVATE_KEY_P8=<secret-managed .p8 private key>
 APPLE_REFRESH_TOKEN_ENCRYPTION_KEY=<secret-managed encryption key>
 ```
 
-No real value belongs in this repository.
+Production uses `production` and `com.ferrari.lenver`. Verify the Key ID
+and the App ID association in Apple Developer. Store the private key and
+refresh-token encryption key in secret-managed deployment configuration.
+
+The configured client ID is the required identity-token audience and the
+client ID used for Apple token exchange and refresh. A Lenver logout revokes
+the submitted Lenver refresh token in the service database. Apple provider
+revocation is detected during refresh validation. This API does not call
+Apple's token revocation endpoint.
 
 ## Persistence invariants
 

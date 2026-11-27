@@ -22,6 +22,10 @@ export class AccountsController {
     @Body() dto: CreateAccountDto,
     @Req() request: AuthenticatedRequest,
   ): Promise<AccountResponseDto> {
-    return this.accountsService.createAccount(dto, request.principal.userId);
+    return this.accountsService.createAccount(
+      dto,
+      request.principal.userId,
+      request.principal,
+    );
   }
 }

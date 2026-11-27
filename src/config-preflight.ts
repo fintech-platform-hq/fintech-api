@@ -2,8 +2,6 @@ import { AppleClientSecretService } from './modules/auth/apple-client-secret.ser
 import { AppleRefreshTokenCipherService } from './modules/auth/apple-refresh-token-cipher.service';
 import { AuthConfig } from './modules/auth/auth.config';
 
-const APPLE_CLIENT_ID = 'com.ferrari.Fintech';
-
 export type ConfigPreflightResult = {
   databaseConfigured: boolean;
   jwtConfigured: boolean;
@@ -26,11 +24,9 @@ export function runConfigPreflight(): ConfigPreflightResult {
 
   let appleConfigured = false;
   try {
-    if (config.appleClientId === APPLE_CLIENT_ID) {
-      void new AppleClientSecretService(config).generate();
-      new AppleRefreshTokenCipherService(config).assertConfigured();
-      appleConfigured = true;
-    }
+    void new AppleClientSecretService(config).generate();
+    new AppleRefreshTokenCipherService(config).assertConfigured();
+    appleConfigured = true;
   } catch {
     // Keep operational output boolean-only so configuration values never leak.
   }

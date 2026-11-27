@@ -8,6 +8,7 @@ const names = [
   'JWT_ACCESS_SECRET',
   'JWT_ISSUER',
   'JWT_AUDIENCE',
+  'LENVER_APPLE_ENVIRONMENT',
   'APPLE_CLIENT_ID',
   'APPLE_TEAM_ID',
   'APPLE_KEY_ID',
@@ -23,7 +24,8 @@ describe('configuration preflight', () => {
     process.env.JWT_ACCESS_SECRET = randomBytes(32).toString('base64url');
     process.env.JWT_ISSUER = 'fintech-api-staging';
     process.env.JWT_AUDIENCE = 'fintech-clients-staging';
-    process.env.APPLE_CLIENT_ID = 'com.ferrari.Fintech';
+    process.env.LENVER_APPLE_ENVIRONMENT = 'staging';
+    process.env.APPLE_CLIENT_ID = 'com.ferrari.lenver.staging';
     process.env.APPLE_TEAM_ID = 'TEAMID1234';
     process.env.APPLE_KEY_ID = 'KEYID12345';
     process.env.APPLE_PRIVATE_KEY_P8 = generateKeyPairSync('ec', {
@@ -42,7 +44,12 @@ describe('configuration preflight', () => {
     }
   });
 
-  it('reports only boolean readiness for valid configuration', () => {
+  it.each([
+    ['staging', 'com.ferrari.lenver.staging'],
+    ['production', 'com.ferrari.lenver'],
+  ])('reports only boolean readiness for %s', (environment, clientId) => {
+    process.env.LENVER_APPLE_ENVIRONMENT = environment;
+    process.env.APPLE_CLIENT_ID = clientId;
     expect(runConfigPreflight()).toEqual({
       databaseConfigured: true,
       jwtConfigured: true,
@@ -68,15 +75,28 @@ describe('configuration preflight', () => {
     );
   });
 
-  it('rejects a client ID other than the native app identifier', () => {
-    process.env.APPLE_CLIENT_ID = 'com.example.other';
+  it.each([
+    ['staging', 'com.ferrari.lenver'],
+    ['production', 'com.ferrari.lenver.staging'],
+    ['staging', 'com.ferrari.Fintech'],
+    ['production', 'com.ferrari.Lenver'],
+    ['preview', 'com.ferrari.lenver'],
+    [undefined, 'com.ferrari.lenver.staging'],
+  ])(
+    'rejects mismatched Apple configuration %s / %s',
+    (environment, clientId) => {
+      if (environment === undefined)
+        delete process.env.LENVER_APPLE_ENVIRONMENT;
+      else process.env.LENVER_APPLE_ENVIRONMENT = environment;
+      process.env.APPLE_CLIENT_ID = clientId;
 
-    expect(runConfigPreflight()).toEqual({
-      databaseConfigured: true,
-      jwtConfigured: true,
-      appleConfigured: false,
-    });
-  });
+      expect(runConfigPreflight()).toEqual({
+        databaseConfigured: true,
+        jwtConfigured: true,
+        appleConfigured: false,
+      });
+    },
+  );
 
   it('exits successfully with boolean-only CLI output', () => {
     const result = runCli();

@@ -127,8 +127,8 @@ describeWithDatabase('Apple refresh (PostgreSQL integration)', () => {
   ) {
     const token = randomUUID();
     await pool.query(
-      `INSERT INTO refresh_sessions (id, user_id, auth_identity_id, family_id, token_hash, expires_at)
-      VALUES ($1, $2, $3, $4, $5, clock_timestamp() + interval '30 days')`,
+      `INSERT INTO refresh_sessions (id, user_id, auth_identity_id, family_id, token_hash, expires_at, family_expires_at)
+      VALUES ($1, $2, $3, $4, $5, clock_timestamp() + interval '30 days', clock_timestamp() + interval '90 days')`,
       [randomUUID(), userId, identityId, familyId, hash(token)],
     );
     return token;
@@ -191,18 +191,6 @@ describeWithDatabase('Apple refresh (PostgreSQL integration)', () => {
       release,
     } as unknown as PoolClient;
     return { client, wrapped, pid, statements, release };
-  }
-  async function waitForBlock(waiter: number, blocker: number) {
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline) {
-      const result = await pool.query<{ blocked: boolean }>(
-        'SELECT $2::int = ANY(pg_blocking_pids($1)) AS blocked',
-        [waiter, blocker],
-      );
-      if (result.rows[0].blocked) return;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-    throw new Error('Expected PostgreSQL lock dependency was not observed');
   }
 
   it('commits selective revocation, preserves financial data and unrelated usable sessions, and reactivation does not revive old sessions', async () => {
@@ -356,14 +344,17 @@ describeWithDatabase('Apple refresh (PostgreSQL integration)', () => {
     async (failure) => {
       const f = await fixture(),
         secondToken = await session(f.userId, f.identityId);
-      const first = await trackedClient(),
-        second = await trackedClient();
       const entered = barrier(),
-        resume = barrier();
-      jest
-        .spyOn(db, 'getClient')
-        .mockResolvedValueOnce(first.wrapped)
-        .mockResolvedValueOnce(second.wrapped);
+        resume = barrier(),
+        secondRead = barrier();
+      const checkout = jest.spyOn(db, 'getClient');
+      let identityReads = 0;
+      jest.spyOn(db, 'query').mockImplementation(async (statement, values) => {
+        const result = await pool.query(statement, values);
+        if (statement.includes('AS validation_due') && ++identityReads === 2)
+          secondRead.resolve();
+        return result;
+      });
       validateRefreshToken.mockImplementation(async () => {
         entered.resolve();
         await resume.promise;
@@ -380,7 +371,8 @@ describeWithDatabase('Apple refresh (PostgreSQL integration)', () => {
         pending.push(
           auth.refresh(secondToken).catch((error: unknown) => error),
         );
-        await waitForBlock(second.pid, first.pid);
+        await secondRead.promise;
+        expect(checkout).not.toHaveBeenCalled();
         expect(validateRefreshToken).toHaveBeenCalledTimes(1);
         resume.resolve();
         const results = await Promise.all(pending);
@@ -395,8 +387,6 @@ describeWithDatabase('Apple refresh (PostgreSQL integration)', () => {
       } finally {
         resume.resolve();
         await Promise.allSettled(pending);
-        if (!first.release.mock.calls.length) first.client.release();
-        if (!second.release.mock.calls.length) second.client.release();
       }
     },
   );
@@ -467,14 +457,8 @@ describeWithDatabase('Apple refresh (PostgreSQL integration)', () => {
       "UPDATE auth_identities SET last_provider_validation_at = clock_timestamp() - interval '25 hours' WHERE id = $1",
       [f.identityId],
     );
-    const first = await trackedClient(),
-      second = await trackedClient(),
-      entered = barrier(),
+    const entered = barrier(),
       resume = barrier();
-    jest
-      .spyOn(db, 'getClient')
-      .mockResolvedValueOnce(first.wrapped)
-      .mockResolvedValueOnce(second.wrapped);
     validateRefreshToken.mockImplementation(async () => {
       entered.resolve();
       await resume.promise;
@@ -485,12 +469,12 @@ describeWithDatabase('Apple refresh (PostgreSQL integration)', () => {
         auth.refresh(rotated.refreshToken).catch((error: unknown) => error),
       );
       await entered.promise;
-      pending.push(auth.refresh(f.token).catch((error: unknown) => error));
-      await waitForBlock(second.pid, first.pid);
+      await expect(auth.refresh(f.token)).rejects.toMatchObject({
+        status: 401,
+      });
       resume.resolve();
-      const [success, reused] = await Promise.all(pending);
-      expect(success).toMatchObject({ expiresIn: 900 });
-      expect(reused).toMatchObject({ status: 401 });
+      const [successor] = await Promise.all(pending);
+      expect(successor).toMatchObject({ status: 401 });
       expect(
         (await sessions(f.userId)).every((row) => row.revoked_at !== null),
       ).toBe(true);
@@ -499,8 +483,6 @@ describeWithDatabase('Apple refresh (PostgreSQL integration)', () => {
     } finally {
       resume.resolve();
       await Promise.allSettled(pending);
-      if (!first.release.mock.calls.length) first.client.release();
-      if (!second.release.mock.calls.length) second.client.release();
     }
   });
 });

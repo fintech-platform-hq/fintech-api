@@ -46,6 +46,16 @@ describeWithDatabase('Sign in with Apple (PostgreSQL integration)', () => {
 
     await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public');
     await pool.query(readFileSync('db.sql', 'utf8'));
+    // Keep these Apple-focused fixtures independent from email delivery.
+    await pool.query(`
+      CREATE FUNCTION fixture_verify_password() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.password_hash IS NOT NULL THEN NEW.email_verified_at := clock_timestamp(); END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER fixture_verify_password BEFORE INSERT ON users
+      FOR EACH ROW EXECUTE FUNCTION fixture_verify_password()
+    `);
 
     const module = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(AppleTokenService)
@@ -228,7 +238,7 @@ describeWithDatabase('Sign in with Apple (PostgreSQL integration)', () => {
     });
   });
 
-  it('links an Apple identity without creating a Fintech session and updates it idempotently', async () => {
+  it('links an Apple identity without creating a Lenver session and updates it idempotently', async () => {
     const registered = authBody(
       (
         await request(app.getHttpServer())
@@ -753,7 +763,7 @@ describeWithDatabase('Sign in with Apple (PostgreSQL integration)', () => {
         registered.accessToken,
         'rollback-second',
       );
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(503);
       expect(phases).toEqual([
         'update-completed',
         'transaction-observed',
@@ -922,39 +932,13 @@ describeWithDatabase('Sign in with Apple (PostgreSQL integration)', () => {
         'subject-two',
       ).then((response) => response);
       void secondResponse.catch(() => undefined);
-      await waitForAdvisoryWait(
-        pool,
-        pids[1],
-        blockerPid,
-        String(lockKey),
-        'ShareLock',
-      );
+      await waitForBackendLock(pool, pids[1], pids[0]);
       expect(checkout).toHaveBeenCalledTimes(2);
       await blocker.query('SELECT pg_advisory_unlock($1)', [lockKey]);
-      // One insert is now waiting on the winner's uncommitted unique-index entry.
-      let winnerPid: number | undefined;
-      const deadline = Date.now() + 5_000;
-      do {
-        const waiting = await pool.query<{ blocker: number }>(
-          `
-          SELECT b.pid AS blocker FROM pg_locks w
-          JOIN pg_locks b ON b.locktype = w.locktype AND b.transactionid = w.transactionid
-          WHERE w.locktype = 'transactionid' AND NOT w.granted AND b.granted
-            AND w.pid = ANY($1::int[]) AND b.pid = ANY($1::int[]) AND w.pid <> b.pid
-            AND b.pid = ANY(pg_blocking_pids(w.pid))
-        `,
-          [pids],
-        );
-        if (waiting.rows.length === 1) {
-          winnerPid = waiting.rows[0].blocker;
-          break;
-        }
-        await new Promise<void>((resolve) => setImmediate(resolve));
-      } while (Date.now() < deadline);
-      expect(winnerPid).toBeDefined();
+      const winnerPid = pids[0];
       await waitForAdvisoryWait(
         pool,
-        winnerPid!,
+        winnerPid,
         blockerPid,
         String(lockKey + 1),
       );
@@ -1224,6 +1208,8 @@ describeWithDatabase('Sign in with Apple (PostgreSQL integration)', () => {
         identityToken: `identity-link-${label}`,
         authorizationCode: `code-link-${label}`,
         nonce,
+        password: 'correct horse',
+        consent: true,
       });
   }
 });
@@ -1394,4 +1380,17 @@ interface LinkedStateSnapshot {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+async function waitForBackendLock(pool: Pool, waiter: number, blocker: number) {
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    const result = await pool.query<{ blocked: boolean }>(
+      'SELECT $2::int = ANY(pg_blocking_pids($1)) AS blocked',
+      [waiter, blocker],
+    );
+    if (result.rows[0].blocked) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Expected the holder lock to block the competing link');
 }

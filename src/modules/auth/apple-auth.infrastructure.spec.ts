@@ -18,7 +18,7 @@ import { AppleTokenService } from './apple-token.service';
 import { AuthConfig } from './auth.config';
 import { AuthModule } from './auth.module';
 
-const CLIENT_ID = 'com.example.fintech';
+const CLIENT_ID = 'com.ferrari.lenver.staging';
 const NOW_SECONDS = 2_000_000_000;
 const rsaKeys = generateKeyPairSync('rsa', { modulusLength: 2_048 });
 const ecKeys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
@@ -31,6 +31,7 @@ describe('Apple authentication infrastructure', () => {
       'JWT_ACCESS_SECRET',
       'JWT_ISSUER',
       'JWT_AUDIENCE',
+      'LENVER_APPLE_ENVIRONMENT',
       'APPLE_CLIENT_ID',
       'APPLE_TEAM_ID',
       'APPLE_KEY_ID',
@@ -60,6 +61,7 @@ describe('Apple authentication infrastructure', () => {
     });
 
     it('validates identifiers and normalizes escaped private-key newlines', () => {
+      process.env.LENVER_APPLE_ENVIRONMENT = 'staging';
       process.env.APPLE_CLIENT_ID = CLIENT_ID;
       process.env.APPLE_TEAM_ID = 'TEAMID1234';
       process.env.APPLE_KEY_ID = 'KEYID12345';
@@ -93,6 +95,7 @@ describe('Apple authentication infrastructure', () => {
       ['APPLE_TEAM_ID', 'short'],
       ['APPLE_KEY_ID', 'not-valid!'],
     ])('rejects invalid %s', (name, value) => {
+      process.env.LENVER_APPLE_ENVIRONMENT = 'staging';
       process.env.APPLE_CLIENT_ID = CLIENT_ID;
       process.env.APPLE_TEAM_ID = 'TEAMID1234';
       process.env.APPLE_KEY_ID = 'KEYID12345';
@@ -168,7 +171,7 @@ describe('Apple authentication infrastructure', () => {
       expect(options?.signal).toBeInstanceOf(AbortSignal);
       expect(options?.body).toBeInstanceOf(URLSearchParams);
       expect((options?.body as URLSearchParams).toString()).toBe(
-        'client_id=com.example.fintech&client_secret=client.secret&code=code+%2B+value&grant_type=authorization_code',
+        `client_id=${CLIENT_ID}&client_secret=client.secret&code=code+%2B+value&grant_type=authorization_code`,
       );
       expect((options?.body as URLSearchParams).has('redirect_uri')).toBe(
         false,
@@ -532,7 +535,8 @@ describe('Apple authentication infrastructure', () => {
 
     it.each([
       ['issuer', { iss: 'https://example.com' }],
-      ['audience', { aud: 'other-client' }],
+      ['production audience', { aud: 'com.ferrari.lenver' }],
+      ['legacy audience', { aud: 'com.ferrari.Fintech' }],
       ['expired timestamp', { exp: NOW_SECONDS - 60 }],
       ['future issued-at timestamp', { iat: NOW_SECONDS + 61 }],
       ['inverted timestamps', { iat: NOW_SECONDS + 10, exp: NOW_SECONDS + 10 }],
@@ -673,6 +677,7 @@ describe('Apple authentication infrastructure', () => {
       process.env.JWT_ACCESS_SECRET = '01234567890123456789012345678901';
       process.env.JWT_ISSUER = 'fintech-api-test';
       process.env.JWT_AUDIENCE = 'fintech-clients-test';
+      process.env.LENVER_APPLE_ENVIRONMENT = 'staging';
       process.env.APPLE_CLIENT_ID = CLIENT_ID;
       process.env.APPLE_TEAM_ID = 'TEAMID1234';
       process.env.APPLE_KEY_ID = 'KEYID12345';
@@ -851,6 +856,7 @@ describe('Apple authentication infrastructure', () => {
     process.env.JWT_ACCESS_SECRET = '01234567890123456789012345678901';
     process.env.JWT_ISSUER = 'fintech-api-test';
     process.env.JWT_AUDIENCE = 'fintech-clients-test';
+    delete process.env.LENVER_APPLE_ENVIRONMENT;
     delete process.env.APPLE_CLIENT_ID;
     delete process.env.APPLE_TEAM_ID;
     delete process.env.APPLE_KEY_ID;

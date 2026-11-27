@@ -80,14 +80,19 @@ describeWithDatabase('I2 balance checks (HTTP and PostgreSQL)', () => {
     coverageStart = baseAt,
     referenceZone = 'America/Sao_Paulo',
   ) {
+    const email = `i2-${randomUUID()}@example.test`;
     const auth = await http()
       .post('/auth/register')
       .set('X-Forwarded-For', `192.0.2.${++fixtureIP}`)
       .send({
-        email: `i2-${randomUUID()}@example.test`,
+        email,
         password: 'fictional i2 password',
       })
       .expect(201);
+    await pool.query(
+      'UPDATE users SET email_verified_at = now() WHERE email = $1',
+      [email],
+    );
     const authorization = `Bearer ${(auth.body as { accessToken: string }).accessToken}`;
     const response = await http()
       .post('/mvp/account')

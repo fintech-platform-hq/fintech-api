@@ -6,6 +6,7 @@ import { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { AppleAuthError } from '../src/modules/auth/apple-auth.errors';
 import { AppleTokenService } from '../src/modules/auth/apple-token.service';
+import { AuthService } from '../src/modules/auth/auth.service';
 import { DatabaseService } from '../src/common/database/database.service';
 
 const secret = '01234567890123456789012345678901';
@@ -16,8 +17,13 @@ let testApp: INestApplication<App>;
 describe('Apple linking API (e2e)', () => {
   const exchangeAuthorizationCode = jest.fn();
   const query = jest.fn((text: string) => {
-    if (text.includes('FROM auth_identities')) return { rows: [] };
-    return { rows: [] };
+    if (text.includes('FROM refresh_sessions s'))
+      return Promise.resolve({ rows: [{ financialAccess: true }] });
+    if (text.includes('password_hash = $2'))
+      return Promise.resolve({ rowCount: 1 });
+    if (text.includes('FROM auth_identities'))
+      return Promise.resolve({ rows: [] });
+    return Promise.resolve({ rows: [] });
   });
   const client = { query, release: jest.fn() };
 
@@ -32,10 +38,13 @@ describe('Apple linking API (e2e)', () => {
 
     const module = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(DatabaseService)
-      .useValue({ getClient: jest.fn().mockResolvedValue(client) })
+      .useValue({ query, getClient: jest.fn().mockResolvedValue(client) })
       .overrideProvider(AppleTokenService)
       .useValue({ exchangeAuthorizationCode })
       .compile();
+    jest
+      .spyOn(module.get(AuthService), 'provePassword')
+      .mockResolvedValue('hash');
     testApp = module.createNestApplication();
     const express = testApp.getHttpAdapter().getInstance() as {
       set(setting: string, value: unknown): void;
@@ -106,9 +115,11 @@ describe('Apple linking API (e2e)', () => {
     ['apple', makeAccessToken(userId, 'apple')],
     ['legacy', makeAccessToken(userId)],
   ])(
-    'returns 403 for a %s-origin token before consuming Apple credentials',
-    async (_label, token) => {
-      await postLink('198.51.100.2', token).expect(403);
+    'rejects a %s-origin token before consuming Apple credentials',
+    async (label, token) => {
+      await postLink('198.51.100.2', token).expect(
+        label === 'legacy' ? 401 : 403,
+      );
       expect(exchangeAuthorizationCode).not.toHaveBeenCalled();
     },
   );
@@ -198,6 +209,8 @@ function postLink(
       identityToken: 'identity-token',
       authorizationCode: 'authorization-code',
       nonce,
+      password: 'synthetic password',
+      consent: true,
     });
 }
 
@@ -216,7 +229,7 @@ function makeAccessToken(
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + expiresIn,
     jti: '10000000-0000-4000-8000-000000000011',
-    ...(authMethod ? { auth_method: authMethod } : {}),
+    ...(authMethod ? { auth_method: authMethod, sid: userId } : {}),
   });
   const signature = createHmac('sha256', secret)
     .update(`${header}.${payload}`)

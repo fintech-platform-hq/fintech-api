@@ -18,6 +18,8 @@ describe('Accounts API (e2e)', () => {
 
   let app: INestApplication<App>;
   const query = jest.fn((text: string, parameters?: unknown[]) => {
+    if (text.includes('FROM refresh_sessions s'))
+      return Promise.resolve({ rows: [{ financialAccess: true }] });
     if (text.includes('INSERT INTO accounts')) {
       return Promise.resolve({
         rows: [
@@ -43,7 +45,10 @@ describe('Accounts API (e2e)', () => {
       imports: [AppModule],
     })
       .overrideProvider(DatabaseService)
-      .useValue({ query, getClient: jest.fn() })
+      .useValue({
+        query,
+        getClient: jest.fn().mockResolvedValue({ query, release: jest.fn() }),
+      })
       .compile();
 
     app = module.createNestApplication();
@@ -86,7 +91,11 @@ describe('Accounts API (e2e)', () => {
       .set('Idempotency-Key', account.id)
       .send({ ...input, expectedRevision: '4', action: 'create' })
       .expect(400);
-    expect(query).not.toHaveBeenCalled();
+    expect(
+      query.mock.calls.filter(
+        ([sql]) => !sql.includes('FROM refresh_sessions s'),
+      ),
+    ).toHaveLength(0);
   });
 
   it('returns an empty list for an authenticated user without accounts', async () => {
@@ -119,12 +128,11 @@ describe('Accounts API (e2e)', () => {
     expect(body.name).toBe('Main');
     expect(body.currency).toBe('BRL');
     expect(body.createdAt).toBe(account.created_at.toISOString());
-    expect(query.mock.calls[0][1]).toEqual([
-      expect.any(String),
-      userId,
-      'Main',
-      'BRL',
-    ]);
+    expect(
+      query.mock.calls.find(([sql]) =>
+        sql.includes('INSERT INTO accounts'),
+      )?.[1],
+    ).toEqual([expect.any(String), userId, 'Main', 'BRL']);
   });
 
   it.each([
@@ -167,7 +175,11 @@ describe('Accounts API (e2e)', () => {
       await request(app.getHttpServer())
         .get(`/mvp/account/${account.id}/checks`)
         .expect(401);
-      expect(query).not.toHaveBeenCalled();
+      expect(
+        query.mock.calls.filter(
+          ([sql]) => !sql.includes('FROM refresh_sessions s'),
+        ),
+      ).toHaveLength(0);
     });
 
     it.each([
@@ -184,7 +196,11 @@ describe('Accounts API (e2e)', () => {
         .set('Authorization', `Bearer ${accessToken}`)
         .send({ ...input, ...changes })
         .expect(400);
-      expect(query).not.toHaveBeenCalled();
+      expect(
+        query.mock.calls.filter(
+          ([sql]) => !sql.includes('FROM refresh_sessions s'),
+        ),
+      ).toHaveLength(0);
     });
 
     it('requires a UUID confirmation key and a valid revision', async () => {
@@ -203,7 +219,11 @@ describe('Accounts API (e2e)', () => {
         .set('Idempotency-Key', userId)
         .send({ ...input, expectedRevision: '9223372036854775808' })
         .expect(400);
-      expect(query).not.toHaveBeenCalled();
+      expect(
+        query.mock.calls.filter(
+          ([sql]) => !sql.includes('FROM refresh_sessions s'),
+        ),
+      ).toHaveLength(0);
     });
 
     it('rejects an incomplete page key and unknown view', async () => {
@@ -213,7 +233,11 @@ describe('Accounts API (e2e)', () => {
           .set('Authorization', `Bearer ${accessToken}`);
       await list().query({ after: userId }).expect(400);
       await list().query({ view: 'resolved' }).expect(400);
-      expect(query).not.toHaveBeenCalled();
+      expect(
+        query.mock.calls.filter(
+          ([sql]) => !sql.includes('FROM refresh_sessions s'),
+        ),
+      ).toHaveLength(0);
     });
   });
 
@@ -226,6 +250,8 @@ function makeAccessToken(userId: string): string {
   const header = encode({ alg: 'HS256', typ: 'JWT' });
   const payload = encode({
     sub: userId,
+    auth_method: 'password',
+    sid: userId,
     iss: 'fintech-api-test',
     aud: 'fintech-clients-test',
     iat: 1_000,

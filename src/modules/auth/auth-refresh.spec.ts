@@ -11,6 +11,7 @@ function fixture(apple = true, validationDue = true) {
   const identity = {
     id: identityId,
     provider_subject: 'subject',
+    validation_due: validationDue,
     provider_refresh_token_ciphertext: ciphertext,
     revoked_at: null as Date | null,
   };
@@ -18,17 +19,15 @@ function fixture(apple = true, validationDue = true) {
     user_id: '10000000-0000-4000-8000-000000000001',
     auth_identity_id: apple ? identityId : null,
     family_id: '10000000-0000-4000-8000-000000000003',
-    expires_at: new Date('2099-01-01'),
+    family_expires_at: new Date('2099-01-01'),
     revoked_at: null as Date | null,
   };
   const query = jest.fn((sql: string): Promise<{ rows: unknown[] }> => {
-    if (sql.includes('AS validation_due'))
-      return Promise.resolve({ rows: [{ validation_due: validationDue }] });
     if (sql.includes('FROM auth_identities'))
       return Promise.resolve({ rows: [identity] });
     if (sql.includes('FROM refresh_sessions'))
       return Promise.resolve({ rows: [session] });
-    return Promise.resolve({ rows: [] });
+    return Promise.resolve({ rows: [], rowCount: 1 });
   });
   const release = jest.fn();
   const validateRefreshToken = jest
@@ -36,7 +35,10 @@ function fixture(apple = true, validationDue = true) {
     .mockResolvedValue();
   const decrypt = jest.fn().mockReturnValue('provider-token-sentinel');
   const service = new AuthService(
-    { getClient: jest.fn().mockResolvedValue({ query, release }) } as never,
+    {
+      query,
+      getClient: jest.fn().mockResolvedValue({ query, release }),
+    } as never,
     {
       jwtSecret: 'unit-secret',
       jwtIssuer: 'test',
@@ -96,12 +98,14 @@ describe('Apple refresh decisions and transaction cleanup', () => {
       sql.findIndex((s) => s.includes('INSERT INTO refresh_sessions')),
     );
     expect(sql.indexOf('COMMIT')).toBeGreaterThan(success);
-    expect(sql.findIndex((s) => s.includes('FOR NO KEY UPDATE'))).toBeLessThan(
-      sql.findIndex((s) => s.includes('pg_advisory_xact_lock(hashtext($1))')),
+    expect(f.validateRefreshToken.mock.invocationCallOrder[0]).toBeLessThan(
+      f.query.mock.invocationCallOrder[sql.indexOf('BEGIN')],
     );
     expect(
-      sql.findIndex((s) => s.includes('pg_advisory_xact_lock(hashtext($1))')),
-    ).toBeLessThan(sql.findIndex((s) => s.includes('FOR UPDATE')));
+      sql.findIndex((statement) =>
+        statement.includes('FROM users WHERE id = $1 FOR UPDATE'),
+      ),
+    ).toBeLessThan(success);
   });
 
   it.each<AppleAuthErrorCode>([
@@ -120,11 +124,12 @@ describe('Apple refresh decisions and transaction cleanup', () => {
       message: 'Apple authentication is temporarily unavailable',
     });
     expect(
-      f.query.mock.calls.some(([sql]) => /UPDATE |INSERT /.test(sql)),
+      f.query.mock.calls.some(([sql]) =>
+        /^(UPDATE|INSERT) /i.test(sql.trimStart()),
+      ),
     ).toBe(false);
-    expect(f.query).toHaveBeenCalledWith('ROLLBACK');
-    expect(f.query).not.toHaveBeenCalledWith('COMMIT');
-    expect(f.release).toHaveBeenCalledTimes(1);
+    expect(f.query).not.toHaveBeenCalledWith('BEGIN');
+    expect(f.release).not.toHaveBeenCalled();
   });
 
   it('sanitizes cipher failure before Apple and leaves the session untouched', async () => {
@@ -138,7 +143,9 @@ describe('Apple refresh decisions and transaction cleanup', () => {
     });
     expect(f.validateRefreshToken).not.toHaveBeenCalled();
     expect(
-      f.query.mock.calls.some(([sql]) => /UPDATE |INSERT /.test(sql)),
+      f.query.mock.calls.some(([sql]) =>
+        /^(UPDATE|INSERT) /i.test(sql.trimStart()),
+      ),
     ).toBe(false);
   });
 

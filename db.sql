@@ -1114,4 +1114,51 @@ RETURNS numeric LANGUAGE sql STABLE AS $$
   WHERE r.check_id = mvp_recovery_delta.check_id
 $$;
 
+CREATE TABLE identity_method_receipts (
+  user_id uuid NOT NULL REFERENCES users (id),
+  family_id uuid NOT NULL,
+  operation_id uuid NOT NULL,
+  action text NOT NULL CHECK (action IN ('apple_link', 'apple_unlink', 'password_link', 'password_unlink')),
+  PRIMARY KEY (user_id, family_id, operation_id)
+);
+
+CREATE TABLE lenver_schema_version (
+  singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+  version text NOT NULL CHECK (length(version) BETWEEN 1 AND 64),
+  recorded_at timestamptz NOT NULL DEFAULT statement_timestamp()
+);
+
+ALTER TABLE users ADD COLUMN email_verified_at timestamptz;
+ALTER TABLE auth_identities ADD COLUMN unlinked_at timestamptz;
+ALTER TABLE refresh_sessions ADD COLUMN family_expires_at timestamptz;
+CREATE UNIQUE INDEX idx_refresh_sessions_v1_current
+ON refresh_sessions (family_id)
+WHERE revoked_at IS NULL AND family_expires_at IS NOT NULL;
+
+CREATE TABLE identity_email_proofs (
+  user_id uuid NOT NULL REFERENCES users (id),
+  purpose text NOT NULL CHECK (purpose IN ('verify', 'recover', 'add_password')),
+  email varchar(254) NOT NULL,
+  family_id uuid,
+  CHECK ((purpose = 'add_password') = (family_id IS NOT NULL)),
+  proof_hash char(64) NOT NULL,
+  expires_at timestamptz NOT NULL,
+  attempts smallint NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 5),
+  consumed_at timestamptz,
+  PRIMARY KEY (user_id, purpose)
+);
+
+CREATE TABLE identity_password_changes (
+  user_id uuid NOT NULL REFERENCES users (id),
+  family_id uuid NOT NULL,
+  operation_id uuid NOT NULL,
+  proof_hash char(64) NOT NULL,
+  expires_at timestamptz NOT NULL,
+  committed_at timestamptz,
+  PRIMARY KEY (user_id, family_id, operation_id)
+);
+
+INSERT INTO lenver_schema_version (singleton, version)
+VALUES (true, '20261127_v1_method_receipts');
+
 COMMIT;

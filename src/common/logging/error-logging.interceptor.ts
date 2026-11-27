@@ -21,16 +21,20 @@ export class ErrorLoggingInterceptor implements NestInterceptor {
       catchError((error: unknown) => {
         const request = context.switchToHttp().getRequest<RequestWithId>();
         const route = request.route as { path?: unknown } | undefined;
-        if (typeof route?.path === 'string' && route.path.startsWith('/mvp/')) {
+        const path = typeof route?.path === 'string' ? route.path : '';
+        const auth = /^\/(v1\/)?auth\//i.test(path);
+        if (auth || path.startsWith('/mvp/')) {
           const responseError =
             error instanceof HttpException
               ? error
               : new ServiceUnavailableException(
-                  'Financial account temporarily unavailable',
+                  auth
+                    ? 'Authentication temporarily unavailable'
+                    : 'Financial account temporarily unavailable',
                 );
           this.logger.error({
             requestId: request.requestId,
-            path: route.path,
+            path,
             statusCode: responseError.getStatus(),
           });
           return throwError(() => responseError);

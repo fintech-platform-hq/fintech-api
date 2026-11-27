@@ -48,6 +48,15 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
     const mvpStart = bootstrap.indexOf('CREATE TABLE mvp_accounts');
     expect(mvpStart).toBeGreaterThan(0);
     await pool.query(bootstrap.slice(0, mvpStart));
+    await pool.query(
+      readFileSync(
+        'migrations/20261126_compatibility_schema_version.sql',
+        'utf8',
+      ),
+    );
+    await pool.query(
+      readFileSync('migrations/20261127_identity_session.sql', 'utf8'),
+    );
 
     const module = await Test.createTestingModule({
       imports: [AppModule],
@@ -887,14 +896,19 @@ describeWithDatabase('I1-A account (HTTP and PostgreSQL)', () => {
   }
 
   async function register() {
+    const email = `${randomUUID()}@example.test`;
     const response = await http()
       .post('/auth/register')
       .set('X-Forwarded-For', `192.0.2.${++fixtureIP}`)
       .send({
-        email: `${randomUUID()}@example.test`,
+        email,
         password: 'disposable fake password',
       })
       .expect(201);
+    await pool.query(
+      'UPDATE users SET email_verified_at = now() WHERE email = $1',
+      [email],
+    );
     return `Bearer ${(response.body as { accessToken: string }).accessToken}`;
   }
 
