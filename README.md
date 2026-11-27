@@ -20,7 +20,7 @@ curl https://fintech-api-87yw.onrender.com/
 
 ```json
 {
-  "name": "fintech-api",
+  "name": "lenver-api",
   "status": "running"
 }
 ```
@@ -58,6 +58,22 @@ The API provides:
 - [OpenAPI 3.1 contract](./openapi.yaml) for the current public API
 
 The published source includes the I1–I5 MVP account endpoints for a BRL opening balance, revisioned history, dated balance checks, retroactive expense recovery, and audited corrections. See the [OpenAPI contract](./openapi.yaml) for the endpoints in your checkout. Deployment, legacy-data adoption, and operation against a live database require separate verification.
+
+### Sign-in method operation receipts
+
+OpenAPI 1.1.0 adds an optional UUID `Idempotency-Key` to Apple link/unlink,
+password link confirmation and password unlink. Use a new UUID for each
+deliberate change. Query `GET /v1/auth/method-operations/{operationId}` with
+the same holder's active session family after a response is lost. An absent
+receipt returns `unknown` and never replays the command. Use a password
+session for a receipt-tracked Apple unlink so that the initiating family
+remains usable.
+
+Upgrade the schema in order using the tracked migrations. The receipt
+migration requires `20261127_v1` and advances the readiness marker to
+`20261127_v1_method_receipts`. Rehearse migration and verify the target
+runtime role can read and insert method receipts before connecting this
+candidate to an existing database.
 
 ## Why Idempotency Matters
 
@@ -329,13 +345,21 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5432/fintech
 JWT_ACCESS_SECRET=<at-least-32-characters-from-a-secret-store>
 JWT_ISSUER=fintech-api
 JWT_AUDIENCE=fintech-clients
-APPLE_CLIENT_ID=<configured-apple-client-id>
+LENVER_APPLE_ENVIRONMENT=staging
+APPLE_CLIENT_ID=com.ferrari.lenver.staging
 APPLE_TEAM_ID=<10-character-team-id>
 APPLE_KEY_ID=<10-character-key-id>
 APPLE_PRIVATE_KEY_P8=<secret-managed-private-key>
 APPLE_REFRESH_TOKEN_ENCRYPTION_KEY=<unpadded-base64url-32-byte-key>
 PORT=3000
 ```
+
+For production, pair `LENVER_APPLE_ENVIRONMENT=production` with
+`APPLE_CLIENT_ID=com.ferrari.lenver` and the Apple signing key for that App ID.
+Use the existing database, JWT and refresh-token encryption configuration for
+each environment. After building, run `npm run preflight:config` in the target
+environment to check local configuration. It reports booleans and makes no
+database or Apple requests.
 
 Apple configuration is loaded when Apple sign-in, linking, or an Apple refresh
 whose provider validation is at least 24 hours old requires it. Temporary failures
@@ -346,9 +370,18 @@ encryption keys, or production connection strings.
 
 ### Start with Docker
 
+The checkout builds `lenver-api:local` and uses containers `lenver-api` and
+`lenver-postgres`. Keep the Compose project name used by your existing checkout
+to retain its `postgres_data` volume. The database is still named `fintech`.
+
 ```bash
 docker compose up --build
 ```
+
+If another PostgreSQL already uses host port `5432`, set
+`LENVER_POSTGRES_HOST_PORT=5433` for the Compose command. The API still connects
+to `postgres:5432` inside Compose. Clients running on the host, including a
+locally started API, must use the selected host port in `DATABASE_URL`.
 
 ### Start the API without Docker
 

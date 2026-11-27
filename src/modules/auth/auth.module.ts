@@ -8,8 +8,10 @@ import { AppleRefreshTokenCipherService } from './apple-refresh-token-cipher.ser
 import { AppleTokenService } from './apple-token.service';
 import { AuthConfig } from './auth.config';
 import { AuthController } from './auth.controller';
-import { AuthGuard } from './auth.guard';
+import { AuthGuard, IdentityGuard } from './auth.guard';
 import { AuthRateLimitMiddleware } from './auth-rate-limit.middleware';
+import { IdentityEmailDelivery } from './identity-email-delivery';
+import { IdentityService } from './identity.service';
 import { AuthService } from './auth.service';
 
 @Module({
@@ -19,6 +21,9 @@ import { AuthService } from './auth.service';
     AuthConfig,
     AuthService,
     AuthGuard,
+    IdentityGuard,
+    IdentityEmailDelivery,
+    IdentityService,
     AuthRateLimitMiddleware,
     AppleApiClient,
     AppleJwksService,

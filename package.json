@@ -1,5 +1,5 @@
 {
-  "name": "fintech-api",
+  "name": "lenver-api",
   "version": "0.0.1",
   "description": "",
   "author": "",
@@ -19,7 +19,9 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "test:integration": "jest --config ./test/jest-integration.json --runInBand"
+    "test:integration": "jest --config ./test/jest-integration.json --runInBand",
+    "test:compatibility-upgrade": "jest --config ./test/jest-upgrade.json --runInBand",
+    "verify:compatibility": "bash scripts/verify-compatibility.sh"
   },
   "dependencies": {
     "@nestjs/cli": "^11.0.24",

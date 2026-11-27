@@ -1,3 +1,8 @@
+import {
+  authorizeFinancialWrite,
+  commitFinancialWrite,
+} from '../auth/session-authority';
+import type { AuthPrincipal } from '../auth/auth.types';
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { DatabaseService } from '../../common/database/database.service';
@@ -34,16 +39,25 @@ export class AccountsService {
   async createAccount(
     dto: CreateAccountDto,
     userId: string,
+    principal?: AuthPrincipal,
   ): Promise<AccountResponseDto> {
-    const result = await this.db.query<AccountPersistenceRecord>(
-      `
-        INSERT INTO accounts (id, user_id, name, currency)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, name, currency, created_at
-      `,
-      [randomUUID(), userId, dto.name, dto.currency],
-    );
-
-    return AccountResponseDto.fromPersistence(result.rows[0]);
+    const client = await this.db.getClient();
+    try {
+      await client.query('BEGIN');
+      await authorizeFinancialWrite(client, userId, principal);
+      const result = await client.query<AccountPersistenceRecord>(
+        `INSERT INTO accounts (id, user_id, name, currency)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, name, currency, created_at`,
+        [randomUUID(), userId, dto.name, dto.currency],
+      );
+      await commitFinancialWrite(client, principal);
+      return AccountResponseDto.fromPersistence(result.rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }

@@ -61,6 +61,7 @@ describe('TransactionsController', () => {
       dto,
       idempotencyKey,
       '00000000-0000-4000-8000-000000000010',
+      { userId: '00000000-0000-4000-8000-000000000010' },
     );
   });
 });

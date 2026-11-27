@@ -67,6 +67,9 @@ describeWithDatabase('Accounts API (PostgreSQL integration)', () => {
       .send({ email: 'accounts-second@example.com', password: 'correct horse' })
       .expect(201);
 
+    await pool.query(
+      "UPDATE users SET email_verified_at = now() WHERE email IN ('accounts-first@example.com','accounts-second@example.com')",
+    );
     firstAccessToken = authBody(first.body).accessToken;
     secondAccessToken = authBody(second.body).accessToken;
   });

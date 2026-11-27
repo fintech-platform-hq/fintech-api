@@ -86,6 +86,10 @@ describeWithDatabase(
       firstRefreshToken = firstAuth.refreshToken;
       firstUserId = accessTokenSubject(firstAccessToken);
       secondUserId = accessTokenSubject(secondAccessToken);
+      await pool.query(
+        'UPDATE users SET email_verified_at = now() WHERE id = ANY($1::uuid[])',
+        [[firstUserId, secondUserId]],
+      );
 
       await pool.query(
         `
@@ -492,7 +496,7 @@ async function waitForBlockedAuthOperations(
           AND wait_event_type = 'Lock'
           AND (
             query LIKE '%refresh_sessions%'
-            OR query LIKE '%pg_advisory_xact_lock%'
+            OR query LIKE '%FROM users WHERE id = %FOR UPDATE%'
           )
       `,
     );

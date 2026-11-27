@@ -1,4 +1,9 @@
 import {
+  authorizeFinancialWrite,
+  commitFinancialWrite,
+} from '../auth/session-authority';
+import type { AuthPrincipal } from '../auth/auth.types';
+import {
   BadRequestException,
   ConflictException,
   Injectable,
@@ -209,6 +214,7 @@ export class MvpAuditService {
     userId: string,
     key: string,
     dto: MvpAuditConfirmation,
+    principal?: AuthPrincipal,
   ): Promise<AuditReceipt> {
     if (!isUUID(key))
       throw new BadRequestException('Idempotency-Key must be a UUID');
@@ -226,6 +232,7 @@ export class MvpAuditService {
     try {
       await client.query('BEGIN');
       await client.query("SET LOCAL lock_timeout = '3s'");
+      await authorizeFinancialWrite(client, userId, principal);
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         `${userId}:${key}`,
       ]);
@@ -238,7 +245,7 @@ export class MvpAuditService {
       if (previous) {
         if (previous.request_hash !== hash)
           this.conflict('IDEMPOTENCY_CONFLICT', 'Idempotency key already used');
-        await client.query('COMMIT');
+        await commitFinancialWrite(client, principal);
         return previous.response;
       }
       const {
@@ -358,7 +365,7 @@ export class MvpAuditService {
         'INSERT INTO idempotency_keys (id, user_id, idempotency_key, request_hash, response) VALUES ($1,$2,$3,$4,$5)',
         [randomUUID(), userId, key, hash, JSON.stringify(receipt)],
       );
-      await client.query('COMMIT');
+      await commitFinancialWrite(client, principal);
       return receipt;
     } catch (error) {
       await client.query('ROLLBACK');

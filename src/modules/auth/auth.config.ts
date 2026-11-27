@@ -10,7 +10,19 @@ export class AuthConfig {
   readonly refreshTokenSeconds = 30 * 24 * 60 * 60;
 
   get appleClientId(): string {
-    return this.requiredAppleValue('APPLE_CLIENT_ID');
+    const environment = this.requiredAppleValue('LENVER_APPLE_ENVIRONMENT');
+    const clientId = this.requiredAppleValue('APPLE_CLIENT_ID');
+    if (
+      (environment === 'staging' &&
+        clientId === 'com.ferrari.lenver.staging') ||
+      (environment === 'production' && clientId === 'com.ferrari.lenver')
+    ) {
+      return clientId;
+    }
+    throw new AppleAuthError(
+      'INVALID_APPLE_CONFIGURATION',
+      'APPLE_CLIENT_ID must match the native App ID for LENVER_APPLE_ENVIRONMENT',
+    );
   }
 
   get appleTeamId(): string {

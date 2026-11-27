@@ -17,7 +17,7 @@ describe('Refresh public contract (e2e)', () => {
     user_id: string;
     auth_identity_id: string | null;
     family_id: string;
-    expires_at: Date;
+    family_expires_at: Date;
     revoked_at: Date | null;
   };
   let identity: {
@@ -30,15 +30,13 @@ describe('Refresh public contract (e2e)', () => {
   const query = jest.fn((sql: string): Promise<{ rows: unknown[] }> => {
     if (sql === 'BEGIN') originalRevocation = session.revoked_at;
     if (sql === 'ROLLBACK') session.revoked_at = originalRevocation;
-    if (sql.includes('AS validation_due'))
-      return Promise.resolve({ rows: [{ validation_due: due }] });
     if (sql.includes('FROM auth_identities'))
-      return Promise.resolve({ rows: [identity] });
+      return Promise.resolve({ rows: [{ ...identity, validation_due: due }] });
     if (sql.includes('FROM refresh_sessions'))
       return Promise.resolve({ rows: [session] });
     if (sql.includes('UPDATE refresh_sessions'))
       session.revoked_at = new Date();
-    return Promise.resolve({ rows: [] });
+    return Promise.resolve({ rows: [], rowCount: 1 });
   });
   const client = { query, release: jest.fn() };
   const errorLogs: unknown[] = [];
@@ -53,7 +51,7 @@ describe('Refresh public contract (e2e)', () => {
     ).toString('base64url');
     const module = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(DatabaseService)
-      .useValue({ getClient: jest.fn().mockResolvedValue(client) })
+      .useValue({ query, getClient: jest.fn().mockResolvedValue(client) })
       .overrideProvider(AppleTokenService)
       .useValue({ validateRefreshToken })
       .compile();
@@ -92,7 +90,7 @@ describe('Refresh public contract (e2e)', () => {
       user_id: randomUUID(),
       auth_identity_id: id,
       family_id: randomUUID(),
-      expires_at: new Date('2099-01-01'),
+      family_expires_at: new Date('2099-01-01'),
       revoked_at: null,
     };
   });

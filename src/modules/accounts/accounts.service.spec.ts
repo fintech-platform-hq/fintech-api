@@ -22,7 +22,10 @@ describe('AccountsService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AccountsService,
-        { provide: DatabaseService, useValue: { query } },
+        {
+          provide: DatabaseService,
+          useValue: { query, getClient: () => ({ query, release: jest.fn() }) },
+        },
       ],
     }).compile();
 
@@ -64,7 +67,10 @@ describe('AccountsService', () => {
       currency: 'BRL',
     });
 
-    const [sql, parameters] = query.mock.calls[0];
+    const match = query.mock.calls.find(([sql]) =>
+      sql.includes('INSERT INTO accounts'),
+    );
+    const [sql, parameters] = match ?? [];
     if (!parameters) {
       throw new Error('Expected account insert parameters');
     }

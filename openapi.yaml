@@ -1,8 +1,13 @@
 openapi: 3.1.0
 info:
   title: Lenver API
-  version: 0.0.1
-  description: Public contract for authenticated accounts, personal balances and transaction creation.
+  version: 1.1.0
+  description: |
+    V1 identity and session contract. The server checks the current holder, session family,
+    and sign-in method. Password sessions with pending verification receive 403 on every
+    financial endpoint. Expired, revoked, and pre-V1 sessions receive 401. The legacy
+    /auth prefix is a compatibility alias with these same rules and request shapes.
+    Email delivery in the local candidate is simulated.
 servers:
   - url: https://fintech-api-87yw.onrender.com
     description: Production
@@ -21,6 +26,8 @@ paths:
           $ref: '#/components/responses/MvpAccountSummary'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '503':
           $ref: '#/components/responses/MvpUnavailable'
     post:
@@ -43,6 +50,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -67,6 +76,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '503':
@@ -90,6 +101,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -122,6 +135,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -152,6 +167,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -187,6 +204,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -228,6 +247,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -256,6 +277,8 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '409': { $ref: '#/components/responses/MvpConflict' }
         '503': { $ref: '#/components/responses/MvpUnavailable' }
   /mvp/audited-changes:
@@ -306,6 +329,8 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '409': { $ref: '#/components/responses/MvpConflict' }
         '503': { $ref: '#/components/responses/MvpUnavailable' }
   /mvp/account/{accountId}/base-versions:
@@ -329,6 +354,8 @@ paths:
                 items: { $ref: '#/components/schemas/MvpBaseVersion' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /mvp/account/{accountId}/history/{movementId}/versions:
     get:
       summary: List the original and audited versions of a movement
@@ -354,6 +381,8 @@ paths:
                 items: { $ref: '#/components/schemas/MvpMovementVersion' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '503': { $ref: '#/components/responses/MvpUnavailable' }
   /mvp/recovery-previews:
     post:
@@ -379,6 +408,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '503':
@@ -412,6 +443,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -452,13 +485,15 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/MvpConflict'
         '503':
           $ref: '#/components/responses/MvpUnavailable'
-  /auth/register:
+  /v1/auth/register:
     post:
       summary: Register with email and password
       operationId: register
@@ -477,7 +512,7 @@ paths:
           $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/TooManyRequests'
-  /auth/login:
+  /v1/auth/login:
     post:
       summary: Authenticate with email and password
       operationId: login
@@ -496,7 +531,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '429':
           $ref: '#/components/responses/TooManyRequests'
-  /auth/apple:
+  /v1/auth/apple:
     post:
       summary: Authenticate with Sign in with Apple
       operationId: authenticateWithApple
@@ -519,18 +554,20 @@ paths:
           $ref: '#/components/responses/TooManyRequests'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-  /auth/apple/link:
+  /v1/auth/apple/link:
     post:
       summary: Explicitly link a Sign in with Apple identity
       operationId: linkAppleIdentity
       security:
         - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdentityMethodOperationId'
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/AppleAuthenticationRequest'
+              $ref: '#/components/schemas/AppleLinkProof'
       responses:
         '204':
           description: Apple identity linked; the current session remains valid.
@@ -546,7 +583,7 @@ paths:
           $ref: '#/components/responses/TooManyRequests'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-  /auth/refresh:
+  /v1/auth/refresh:
     post:
       summary: Rotate a refresh token
       operationId: refresh
@@ -567,9 +604,9 @@ paths:
           $ref: '#/components/responses/TooManyRequests'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-  /auth/logout:
+  /v1/auth/logout:
     post:
-      summary: Revoke a refresh session
+      summary: Revoke the family associated with the submitted refresh token
       operationId: logout
       requestBody:
         required: true
@@ -579,11 +616,385 @@ paths:
               $ref: '#/components/schemas/RefreshTokenRequest'
       responses:
         '204':
-          description: Session revoked; no response body.
+          description: Family revoked if the token was known, with an empty response for every valid request.
         '400':
           $ref: '#/components/responses/BadRequest'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+  /v1/auth/session:
+    get:
+      summary: Read the current method and email verification status
+      operationId: currentIdentitySession
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentitySession'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/verification:
+    post:
+      summary: Request a code for the pending password email
+      operationId: requestVerificationCode
+      security:
+        - bearerAuth: []
+      responses:
+        '202':
+          description: Accepted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/verification/confirm:
+    post:
+      summary: Consume the current single-use verification code
+      operationId: confirmVerificationCode
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailProof'
+      responses:
+        '204':
+          description: Applied with an empty response.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/verification/email:
+    post:
+      summary: Correct the pending email after confirming the current password
+      operationId: updatePendingVerificationEmail
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      responses:
+        '204':
+          description: Applied with an empty response.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/recovery:
+    post:
+      summary: Request recovery with a neutral response
+      operationId: requestPasswordRecovery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IdentityEmail'
+      responses:
+        '202':
+          description: Accepted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/recovery/confirm:
+    post:
+      summary: Reset the credential with a recovery code
+      operationId: resetPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryProof'
+      responses:
+        '204':
+          description: Applied with an empty response.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/apple/unlink:
+    post:
+      summary: Remove Apple while preserving a verified password
+      operationId: unlinkAppleIdentity
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdentityMethodOperationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordProof'
+      responses:
+        '204':
+          description: Applied with an empty response.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/password/link:
+    post:
+      summary: Prove the current Apple subject and request a code for the new email
+      operationId: requestPasswordLink
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordLinkRequest'
+      responses:
+        '202':
+          description: Accepted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/password/link/confirm:
+    post:
+      summary: Add a password after consuming the same-family email proof
+      operationId: confirmPasswordLink
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdentityMethodOperationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryProof'
+      responses:
+        '204':
+          description: Applied with an empty response.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/password/unlink:
+    post:
+      summary: Remove password with renewed proof of the current Apple subject
+      operationId: unlinkPassword
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdentityMethodOperationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppleAuthenticationRequest'
+      responses:
+        '204':
+          description: Applied with an empty response.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/method-operations/{operationId}:
+    get:
+      summary: Read a method operation receipt without repeating the mutation
+      operationId: readIdentityMethodOutcome
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: operationId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The originating holder and live session family see a committed receipt, if available. Unknown is non-terminal.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [status, action]
+                    properties:
+                      status: { type: string, enum: [committed] }
+                      action: { type: string, enum: [apple_link, apple_unlink, password_link, password_unlink] }
+                  - type: object
+                    additionalProperties: false
+                    required: [status]
+                    properties:
+                      status: { type: string, enum: [unknown] }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/password/change/proof:
+    post:
+      summary: Issue a single-use proof for the password-change operation
+      operationId: preparePasswordChange
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChangePreparation'
+      responses:
+        '200':
+          description: Current result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasswordChangeProof'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/password/change:
+    post:
+      summary: Consume the proof and atomically change the password
+      operationId: commitPasswordChange
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeCommit'
+      responses:
+        '204':
+          description: Applied with an empty response.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/password/change/{operationId}:
+    get:
+      summary: Read the operation outcome without performing the change
+      operationId: readPasswordChangeOutcome
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: operationId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Current result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasswordChangeOutcome'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /accounts:
     get:
       summary: List accounts owned by the authenticated user
@@ -601,6 +1012,8 @@ paths:
                   $ref: '#/components/schemas/AccountResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalServerError'
     post:
@@ -625,6 +1038,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalServerError'
   /transactions:
@@ -661,6 +1076,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -690,7 +1107,56 @@ paths:
                     const: ok
         '500':
           $ref: '#/components/responses/InternalServerError'
+  /ready:
+    get:
+      summary: Check database and schema readiness
+      description: Returns ready only when PostgreSQL is reachable and the deployed schema compatibility version matches this API. It does not expose dependency details.
+      operationId: getReadiness
+      responses:
+        '200':
+          description: Database is reachable and the schema is compatible.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ready
+        '503':
+          description: Database is unavailable or the schema is incompatible; no database details are returned.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: not_ready
 components:
+  parameters:
+    IdentityMethodOperationId:
+      in: header
+      name: Idempotency-Key
+      required: false
+      description: >
+        Use one UUID per deliberate method change. An already committed UUID replays its
+        original result within the same holder and session family, without rechecking
+        single-use proofs or applying the supplied payload again. Reuse for another action
+        returns 409. For uncertain outcomes, query the receipt with GET. Clients without
+        this header keep the existing behavior. For an Apple unlink with a UUID, use a
+        password session so it remains authorized to consult the receipt.
+      schema: { type: string, format: uuid }
   requestBodies:
     MvpOpening:
       required: true
@@ -1218,6 +1684,82 @@ components:
         transactionId: { type: string, format: uuid }
         revision: { type: string }
         createdAt: { type: string, format: date-time }
+    IdentitySession:
+      type: object
+      required: [email, passwordVerified, hasPassword, hasApple, financialAccess, authMethod]
+      properties:
+        email: { type: [string, 'null'], format: email }
+        passwordVerified: { type: boolean }
+        hasPassword: { type: boolean }
+        hasApple: { type: boolean }
+        financialAccess: { type: boolean }
+        authMethod: { type: string, enum: [password, apple] }
+    IdentityEmail:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+    EmailProof:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, pattern: '^[0-9]{6}$', writeOnly: true }
+    PasswordProof:
+      type: object
+      required: [password]
+      properties:
+        password: { type: string, minLength: 12, maxLength: 128, writeOnly: true }
+    RecoveryProof:
+      allOf:
+        - $ref: '#/components/schemas/IdentityEmail'
+        - $ref: '#/components/schemas/EmailProof'
+        - type: object
+          required: [newPassword]
+          properties:
+            newPassword: { type: string, minLength: 12, maxLength: 128, writeOnly: true }
+    AppleLinkProof:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/AppleAuthorizationFields'
+        - $ref: '#/components/schemas/PasswordProof'
+        - type: object
+          required: [consent]
+          properties:
+            consent: { const: true }
+    PasswordLinkRequest:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/AppleAuthorizationFields'
+        - $ref: '#/components/schemas/IdentityEmail'
+        - type: object
+          required: [consent]
+          properties:
+            consent: { const: true }
+    PasswordChangePreparation:
+      allOf:
+        - $ref: '#/components/schemas/PasswordProof'
+        - type: object
+          required: [operationId]
+          properties:
+            operationId: { type: string, format: uuid }
+    PasswordChangeProof:
+      type: object
+      required: [proof]
+      properties:
+        proof: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' }
+    PasswordChangeCommit:
+      allOf:
+        - $ref: '#/components/schemas/PasswordChangeProof'
+        - type: object
+          required: [operationId, newPassword]
+          properties:
+            operationId: { type: string, format: uuid }
+            newPassword: { type: string, minLength: 12, maxLength: 128, writeOnly: true }
+    PasswordChangeOutcome:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [committed, unknown] }
     Credentials:
       type: object
       additionalProperties: false
@@ -1242,8 +1784,10 @@ components:
           type: string
           maxLength: 256
     AppleAuthenticationRequest:
+      $ref: '#/components/schemas/AppleAuthorizationFields'
+      unevaluatedProperties: false
+    AppleAuthorizationFields:
       type: object
-      additionalProperties: false
       required: [identityToken, authorizationCode, nonce]
       properties:
         identityToken:

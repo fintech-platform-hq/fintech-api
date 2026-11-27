@@ -3,20 +3,21 @@ version: '3.9'
 services:
   postgres:
     image: postgres:16
-    container_name: fintech-postgres
+    container_name: lenver-postgres
     restart: always
     environment:
       POSTGRES_DB: fintech
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      - "${LENVER_POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
   api:
     build: .
-    container_name: fintech-api
+    image: lenver-api:local
+    container_name: lenver-api
     depends_on:
       - postgres
     environment:
@@ -25,6 +26,7 @@ services:
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?JWT_ACCESS_SECRET is required}
       JWT_ISSUER: ${JWT_ISSUER:?JWT_ISSUER is required}
       JWT_AUDIENCE: ${JWT_AUDIENCE:?JWT_AUDIENCE is required}
+      LENVER_APPLE_ENVIRONMENT: ${LENVER_APPLE_ENVIRONMENT:-}
       APPLE_CLIENT_ID: ${APPLE_CLIENT_ID:-}
       APPLE_TEAM_ID: ${APPLE_TEAM_ID:-}
       APPLE_KEY_ID: ${APPLE_KEY_ID:-}

@@ -19,6 +19,17 @@ const LIMITS: Record<string, number> = {
   '/auth/apple/link': 5,
   '/auth/refresh': 10,
   '/auth/logout': 30,
+  '/auth/verification': 5,
+  '/auth/verification/confirm': 10,
+  '/auth/recovery': 5,
+  '/auth/recovery/confirm': 10,
+  '/auth/apple/unlink': 5,
+  '/auth/verification/email': 5,
+  '/auth/password/link': 5,
+  '/auth/password/link/confirm': 10,
+  '/auth/password/unlink': 5,
+  '/auth/password/change/proof': 5,
+  '/auth/password/change': 5,
 };
 
 @Injectable()
@@ -27,7 +38,12 @@ export class AuthRateLimitMiddleware implements NestMiddleware {
   private readonly counters = new Map<string, Counter>();
 
   use(request: Request, response: Response, next: NextFunction): void {
-    const bucketPath = request.path.toLowerCase().replace(/\/+$/, '') || '/';
+    response.setHeader('Cache-Control', 'no-store');
+    const bucketPath =
+      request.path
+        .toLowerCase()
+        .replace(/^\/v1(?=\/auth\/)/, '')
+        .replace(/\/+$/, '') || '/';
     const limit = LIMITS[bucketPath];
     if (!limit) {
       next();

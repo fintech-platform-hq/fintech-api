@@ -24,6 +24,11 @@ export class MvpTransactionsController {
     @Headers('idempotency-key') key: string,
     @Req() request: AuthenticatedRequest,
   ) {
-    return this.transactions.registerMvp(dto, key, request.principal.userId);
+    return this.transactions.registerMvp(
+      dto,
+      key,
+      request.principal.userId,
+      request.principal,
+    );
   }
 }

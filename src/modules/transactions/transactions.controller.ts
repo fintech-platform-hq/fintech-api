@@ -27,6 +27,7 @@ export class TransactionsController {
       dto,
       idempotencyKey,
       request.principal.userId,
+      request.principal,
     );
   }
 }

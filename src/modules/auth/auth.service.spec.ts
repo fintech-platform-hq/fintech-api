@@ -10,6 +10,12 @@ const dto: AppleAuthenticationDto = {
   authorizationCode: 'authorization-code',
   nonce: 'n'.repeat(43),
 };
+const currentPrincipal = {
+  userId: '10000000-0000-4000-8000-000000000001',
+  authMethod: 'password' as const,
+  familyId: '10000000-0000-4000-8000-000000000009',
+  expiresAt: Date.now() + 900_000,
+};
 const exchange = {
   subject: 'apple-subject',
   refreshToken: 'apple-refresh-token',
@@ -45,13 +51,18 @@ describe('AuthService Apple linking', () => {
     },
   );
 
-  it('exchanges once and does not create a Fintech session', async () => {
+  it('exchanges once and does not create a Lenver session', async () => {
     const queries: string[] = [];
     const client = {
       query: jest.fn((text: string) => {
         queries.push(text);
-        if (text.includes('FROM auth_identities')) return { rows: [] };
-        return { rows: [] };
+        if (text.includes('FROM refresh_sessions s'))
+          return Promise.resolve({ rows: [{ financialAccess: true }] });
+        if (text.includes('password_hash = $2'))
+          return Promise.resolve({ rowCount: 1 });
+        if (text.includes('FROM auth_identities'))
+          return Promise.resolve({ rows: [] });
+        return Promise.resolve({ rows: [] });
       }),
       release: jest.fn(),
     };
@@ -69,14 +80,9 @@ describe('AuthService Apple linking', () => {
       cipher as never,
     );
 
+    jest.spyOn(service, 'provePassword').mockResolvedValue('hash');
     await expect(
-      service.linkApple(
-        {
-          userId: '10000000-0000-4000-8000-000000000001',
-          authMethod: 'password',
-        },
-        dto,
-      ),
+      service.linkApple(currentPrincipal, dto),
     ).resolves.toBeUndefined();
 
     expect(appleTokens.exchangeAuthorizationCode).toHaveBeenCalledTimes(1);
@@ -85,9 +91,9 @@ describe('AuthService Apple linking', () => {
       dto.authorizationCode,
       dto.nonce,
     );
-    expect(queries.some((query) => query.includes('refresh_sessions'))).toBe(
-      false,
-    );
+    expect(
+      queries.some((query) => query.includes('INSERT INTO refresh_sessions')),
+    ).toBe(false);
     expect(client.query).toHaveBeenCalledWith('COMMIT');
   });
 
@@ -97,7 +103,12 @@ describe('AuthService Apple linking', () => {
   ])('maps only expected identity constraint %s to 409', async (constraint) => {
     const client = {
       query: jest.fn((text: string) => {
-        if (text.includes('FROM auth_identities')) return { rows: [] };
+        if (text.includes('FROM refresh_sessions s'))
+          return Promise.resolve({ rows: [{ financialAccess: true }] });
+        if (text.includes('password_hash = $2'))
+          return Promise.resolve({ rowCount: 1 });
+        if (text.includes('FROM auth_identities'))
+          return Promise.resolve({ rows: [] });
         if (text.includes('INSERT INTO auth_identities')) {
           const error = new Error('unique violation') as Error & {
             code: string;
@@ -105,9 +116,9 @@ describe('AuthService Apple linking', () => {
           };
           error.code = '23505';
           error.constraint = constraint;
-          throw error;
+          return Promise.reject(error);
         }
-        return { rows: [] };
+        return Promise.resolve({ rows: [] });
       }),
       release: jest.fn(),
     };
@@ -123,14 +134,9 @@ describe('AuthService Apple linking', () => {
       } as never,
     );
 
+    jest.spyOn(service, 'provePassword').mockResolvedValue('hash');
     await expect(
-      service.linkApple(
-        {
-          userId: '10000000-0000-4000-8000-000000000001',
-          authMethod: 'password',
-        },
-        dto,
-      ),
+      service.linkApple(currentPrincipal, dto),
     ).rejects.toMatchObject({
       status: 409,
       message: 'Apple identity cannot be linked',
@@ -141,7 +147,12 @@ describe('AuthService Apple linking', () => {
   it('keeps unexpected unique violations internal', async () => {
     const client = {
       query: jest.fn((text: string) => {
-        if (text.includes('FROM auth_identities')) return { rows: [] };
+        if (text.includes('FROM refresh_sessions s'))
+          return Promise.resolve({ rows: [{ financialAccess: true }] });
+        if (text.includes('password_hash = $2'))
+          return Promise.resolve({ rowCount: 1 });
+        if (text.includes('FROM auth_identities'))
+          return Promise.resolve({ rows: [] });
         if (text.includes('INSERT INTO auth_identities')) {
           const error = new Error('unique violation') as Error & {
             code: string;
@@ -149,9 +160,9 @@ describe('AuthService Apple linking', () => {
           };
           error.code = '23505';
           error.constraint = 'auth_identities_pkey';
-          throw error;
+          return Promise.reject(error);
         }
-        return { rows: [] };
+        return Promise.resolve({ rows: [] });
       }),
       release: jest.fn(),
     };
@@ -167,14 +178,9 @@ describe('AuthService Apple linking', () => {
       } as never,
     );
 
+    jest.spyOn(service, 'provePassword').mockResolvedValue('hash');
     await expect(
-      service.linkApple(
-        {
-          userId: '10000000-0000-4000-8000-000000000001',
-          authMethod: 'password',
-        },
-        dto,
-      ),
+      service.linkApple(currentPrincipal, dto),
     ).rejects.toMatchObject({
       code: '23505',
       constraint: 'auth_identities_pkey',
@@ -194,14 +200,9 @@ describe('AuthService Apple linking', () => {
       { assertConfigured: jest.fn() } as never,
     );
 
+    jest.spyOn(service, 'provePassword').mockResolvedValue('hash');
     await expect(
-      service.linkApple(
-        {
-          userId: '10000000-0000-4000-8000-000000000001',
-          authMethod: 'password',
-        },
-        dto,
-      ),
+      service.linkApple(currentPrincipal, dto),
     ).rejects.toMatchObject({
       status: 401,
       message: 'Invalid Apple authentication',
